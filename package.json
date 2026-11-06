@@ -14,13 +14,15 @@
     "desktop": "npm run build && electron .",
     "desktop:build": "npm run build && electron-builder --win --x64 --publish never"
   },
-  "dependencies": {
+   "dependencies": {
     "@capacitor/android": "^6.2.0",
     "@capacitor/core": "^6.2.0",
     "@capacitor/splash-screen": "^6.0.3",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "@fontsource/cairo": "^5.0.0"
   },
+
   "devDependencies": {
     "@capacitor/cli": "^6.2.0",
     "@vitejs/plugin-react": "^4.3.4",
