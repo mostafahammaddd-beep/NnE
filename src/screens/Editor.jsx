@@ -506,7 +506,7 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
   const timingLine = [
     timing.ocr && `قراءة ${sec1(timing.ocr.ms)}`,
     timing.words && `كلمات ${sec1(timing.words.ms)}`,
-    !isLesson && timing.reason?.stages && `حلّ ${timing.reason.stages.solve}ث · شرح وتريكات ${timing.reason.stages.total}ث`,
+    !isLesson && timing.reason?.stages && (timing.reason.stages.total !== undefined ? `حلّ ${timing.reason.stages.solve}ث · شرح وتريكات ${timing.reason.stages.total}ث` : `حلّ ${timing.reason.stages.solve}ث · أساس ${timing.reason.stages.a}ث · تفصيص ${timing.reason.stages.b}ث`),
   ].filter(Boolean).join(" · ");
   const errCount = Object.values(status).filter((s) => s === "error").length;
 

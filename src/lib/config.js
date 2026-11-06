@@ -6,6 +6,11 @@
    If Google says a model is retired / unavailable for your key, the app drops it and moves to the "-latest" aliases by itself. */
 const ENV = (typeof import.meta !== "undefined" && import.meta.env) || {};
 export const MODEL_FAST = String(ENV.VITE_GEMINI_MODEL || "gemini-2.5-flash").trim();
+/* How the lesson (explanation + traps) is produced — VITE_LESSON_MODE in .env:
+   "fast"   (default) silent solve → part A ∥ part B-main ∥ part B-traps: three SHORT streams at the same time. Fastest. 6 requests per analysis.
+   "split"  part A ∥ part B (B solves by itself, which makes it the slow one). 4 requests per analysis.
+   "single" ONE long request. 3 requests per analysis but 2+ minutes of waiting. */
+export const LESSON_MODE = ["fast", "split", "single"].includes(String(ENV.VITE_LESSON_MODE)) ? String(ENV.VITE_LESSON_MODE) : "fast";
 export const MODEL_PRO = String(ENV.VITE_GEMINI_MODEL_PRO || "gemini-pro-latest").trim();
 
 export const CHIPS = [

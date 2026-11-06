@@ -1081,7 +1081,7 @@ html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--teal-2) 
 @media (prefers-reduced-motion: reduce) { .gal-load { animation: none; } }
 
 /* ───────── v3.23 — calmer reading: more air, one idea per line (applies to EVERY text drawn by RichText) ───────── */
-.rt { gap: 14px; max-width: 920px; margin-inline: auto; }
+.rt { gap: 14px; }
 .rt h4 { margin-top: 26px; padding-top: 18px; }
 .rt h4:first-child { margin-top: 0; padding-top: 0; }
 .rt .li, .rt .num { gap: 12px; }
@@ -1095,7 +1095,7 @@ html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--teal-2) 
 .rt .quote { padding: 11px 14px; }
 .rt .tip { padding: 14px 16px; }
 .qv { gap: 12px; }
-.chat-msg.bot .rt { max-width: none; margin-inline: 0; gap: 11px; }
+.chat-msg.bot .rt { gap: 11px; }
 .chat-msg.bot .rt h4 { margin-top: 18px; padding-top: 14px; }
 .chat-msg.bot .rt .li-sub { font-size: 14px; }
 

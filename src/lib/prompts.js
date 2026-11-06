@@ -230,8 +230,17 @@ ${styleTail(chips, extra)}${linkBlock(history, "question")}`,
 }
 
 /* 5 ─ LESSON B — receives the verified brief from SOLVE (or solves by itself if SOLVE failed) */
-export function buildLessonBPrompt({ history, brief, extra, chips, words }) {
+/* part: undefined = steps · options · answer · vary · memo · tricks (one request)
+         "main"  = steps · options · answer · vary          (v3.23 "fast" mode: runs in parallel with "traps")
+         "traps" = memory sentences + tricks                 (short, runs in parallel with "main") */
+export function buildLessonBPrompt({ history, brief, extra, chips, words, part }) {
   const H = headings(chips);
+  const hasMain = part !== "traps", hasTraps = part !== "main";
+  const scope = part === "main"
+    ? "\nA third tutor writes the memory sentences and the traps at the same moment. Do NOT write them and do NOT write a TRICKS part."
+    : part === "traps"
+      ? "\nA third tutor writes the step-by-step thinking, every option and the answer at the same moment. Do NOT write them: you write ONLY the memory sentences and the traps described below."
+      : "";
   const ground = brief
     ? `The user message contains a VERIFIED ANALYSIS made by a senior item analyst who already solved this question with deep reasoning. Treat its ANSWER as ground truth: never change it and never doubt it — your job is to TEACH it. Use the analysis, the image and your own knowledge to explain; every conclusion you write must agree with the analysis. If its CONFIDENCE is not high, start the answer section with one bullet beginning with "⚠️" that says, in one short line, what is uncertain.`
     : `No verified analysis is available, so FIRST work out the correct answer with maximum care (accuracy matters more than anything else) and double-check it against every option. Then teach.`;
@@ -240,7 +249,7 @@ export function buildLessonBPrompt({ history, brief, extra, chips, words }) {
 
 ${STUDENT}
 
-YOU WRITE PART 2 OF 2. A first tutor writes part 1 (what the question asks, decoding the English, the basics) at the same moment. Do NOT repeat those; write ONLY the sections below.
+YOU WRITE PART 2 OF 2. A first tutor writes part 1 (what the question asks, decoding the English, the basics) at the same moment. Do NOT repeat those; write ONLY the sections below.${scope}
 
 The image is a screenshot of ONE NCLEX-style question (possibly a Next-Gen item: case study, drop-down, matrix, bow-tie …). Read everything in it: stem, exhibits, labs, every option.
 
@@ -251,16 +260,14 @@ ${TEACH}
 
 ${QUALITY}
 
-OUTPUT FORMAT — plain text, exactly two parts separated by marker lines, nothing before the first marker, no code fences, no JSON:
+OUTPUT FORMAT — plain text, ${hasTraps ? "exactly two parts separated by marker lines" : "ONE part after one marker line"}, nothing before the first marker, no code fences, no JSON:
 ===EXPLANATION===
-(explanation text)
-===TRICKS===
-(tricks text)
+(explanation text)${hasTraps ? "\n===TRICKS===\n(tricks text)" : ""}
 
 ${LAYOUT}
 
 EXPLANATION — use exactly these headings, in this order:
-${H.steps}
+${hasMain ? `${H.steps}
 1. 2 to 5 numbered steps that apply the right framework (ABCs, Maslow, nursing process "assess before you intervene", safety first, scope of practice, acute before chronic …) and show HOW to think, not only what to pick.
 ${H.options}
 - One bullet per option, EVERY option: **A) option text in English** ✅ or ❌ — what the option means in simple words, then why it is right or wrong, and (for wrong ones) when it would be right. For select-all-that-apply, judge each option separately. For Next-Gen items, go blank by blank or row by row.
@@ -269,14 +276,14 @@ ${H.answer}
 - **Letter)** and one line explaining why it wins over the others.
 ${H.vary}
 - 2 to 3 bullets: "If the stem said **…** instead, the answer would become **…** because …" — one small change each, so he learns the rule and not only this question.
-${H.memo}
+` : ""}${hasTraps ? `${H.memo}
 > 3 to 5 short English sentences from the rationale that he can memorize (one per line, each starting with "> "), each followed by its translation on the next line (a normal line, no marker).
 
 TRICKS:
 - 2 to 4 bullets, each like "**Trap name:** short explanation" — tricky keywords, tempting distractors, look-alike words, common student mistakes. Trap names are in English.
 - The last line: "💡 " followed by one short memory tip (a mnemonic or a rhyme) in English with its translation.
-
-Length: aim for about ${words} words in total — as deep as the quality bar requires, never padded.
+` : ""}
+Length: aim for about ${part === "main" ? Math.round(words * 0.72) : part === "traps" ? Math.round(words * 0.3) : words} words in total — as deep as the quality bar requires, never padded.
 ${styleTail(chips, extra)}${linkBlock(history, "question")}Start directly with ===EXPLANATION===.`,
     user: brief
       ? `VERIFIED ANALYSIS:\n${brief}\n\nWrite part 2 of the lesson for the question in the image.`
@@ -430,42 +437,46 @@ ${styleTail(chips, extra)}${linkBlock(history, "material")}${ARABIC_RULE}`,
 }
 
 /* part 2 of the lesson (+ the traps) */
-export function buildStudyBPrompt({ history, extra, chips, words }) {
+export function buildStudyBPrompt({ history, extra, chips, words, part }) {
   const H = studyH(chips);
+  const hasMain = part !== "traps", hasTraps = part !== "main";
+  const scope = part === "main"
+    ? "\nA third tutor writes the memory sentences and the traps at the same moment. Do NOT write them and do NOT write a TRICKS part."
+    : part === "traps"
+      ? "\nA third tutor writes how it appears on the exam and the must-memorize list at the same moment. Do NOT write them: you write ONLY the memory sentences and the traps described below."
+      : "";
   return {
     system: `You are an elite NCLEX-RN educator and clinical-reasoning coach, acting as a patient private tutor.
 
 ${STUDENT}
 
 ${MATERIAL}
-YOU WRITE PART 2 OF 2. A first tutor writes part 1 (the big idea, the topics explained from zero, English from the material) at the same moment. Do NOT repeat those; write ONLY the sections below.
+YOU WRITE PART 2 OF 2. A first tutor writes part 1 (the big idea, the topics explained from zero, English from the material) at the same moment. Do NOT repeat those; write ONLY the sections below.${scope}
 
 ${TEACH}
 
 ${QUALITY}
 
-OUTPUT FORMAT — plain text, exactly two parts separated by marker lines, nothing before the first marker, no code fences, no JSON:
+OUTPUT FORMAT — plain text, ${hasTraps ? "exactly two parts separated by marker lines" : "ONE part after one marker line"}, nothing before the first marker, no code fences, no JSON:
 ===EXPLANATION===
-(explanation text)
-===TRICKS===
-(tricks text)
+(explanation text)${hasTraps ? "\n===TRICKS===\n(tricks text)" : ""}
 
 ${LAYOUT}
 
 EXPLANATION — use exactly these headings, in this order:
-${H.exam}
+${hasMain ? `${H.exam}
 - 3 to 6 bullets: how the NCLEX tests this content (question types: priority, delegation, safety, pharmacology, SATA, lab values, Next-Gen …) and what the examiner wants.
 1. 3 to 5 numbered steps: a small decision framework (ABCs, Maslow, assess before you intervene, safety first, scope of practice, acute before chronic …) applied to THIS content.
 ${H.must}
 - A compact checklist of everything worth memorizing from the material (ranges, signs, drugs and antidotes, actions, priorities): one fact per line, **English term** first, then its meaning.
-${H.memo}
+` : ""}${hasTraps ? `${H.memo}
 > 3 to 5 short English sentences that sum up the key rules (one per line, each starting with "> "), each followed by its translation on the next line (a normal line, no marker).
 
 TRICKS:
 - 3 to 5 bullets, each like "**Trap name:** short explanation" — look-alike terms, tempting wrong choices, common student mistakes, exceptions. Trap names are in English.
 - The last line: "💡 " followed by one short memory tip (a mnemonic or a rhyme) in English with its translation.
-
-Length: aim for about ${words} words in total — as deep as the quality bar requires, never padded.
+` : ""}
+Length: aim for about ${part === "main" ? Math.round(words * 0.72) : part === "traps" ? Math.round(words * 0.3) : words} words in total — as deep as the quality bar requires, never padded.
 ${styleTail(chips, extra)}${linkBlock(history, "material")}${ARABIC_RULE}Start directly with ===EXPLANATION===.`,
     user: "Write part 2 of the lesson for the study material.",
   };
