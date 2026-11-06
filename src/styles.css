@@ -1079,3 +1079,28 @@ html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--teal-2) 
 .gal-un { color: var(--teal-ink); }
 .gal-un[data-sure="true"] { width: auto; padding: 0 12px; color: #fff; background: #D64545; border-color: transparent; font-weight: 800; font-size: 12.5px; }
 @media (prefers-reduced-motion: reduce) { .gal-load { animation: none; } }
+
+/* ───────── v3.23 — calmer reading: more air, one idea per line (applies to EVERY text drawn by RichText) ───────── */
+.rt { gap: 14px; max-width: 920px; margin-inline: auto; }
+.rt h4 { margin-top: 26px; padding-top: 18px; }
+.rt h4:first-child { margin-top: 0; padding-top: 0; }
+.rt .li, .rt .num { gap: 12px; }
+.rt .li > em { margin-top: 13px; }
+.rt .li[data-v] { padding: 10px 14px; }
+.rt .li-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.rt .li-head { font-weight: 800; line-height: 1.75; }
+.rt .li-sub { color: var(--ink-2); font-size: .95em; line-height: 1.75; }
+.rt[dir="rtl"] .li-head[dir="ltr"], .rt[dir="rtl"] .li-sub[dir="ltr"] { text-align: right; }   /* English lines keep the same reading edge as the Arabic ones */
+.rt .trans { margin-top: -6px; }
+.rt .quote { padding: 11px 14px; }
+.rt .tip { padding: 14px 16px; }
+.qv { gap: 12px; }
+.chat-msg.bot .rt { max-width: none; margin-inline: 0; gap: 11px; }
+.chat-msg.bot .rt h4 { margin-top: 18px; padding-top: 14px; }
+.chat-msg.bot .rt .li-sub { font-size: 14px; }
+
+/* the question drawer can be resized: drag its inner edge (double-click = back to normal width) */
+.chat:not(.chat-win) .win-rs-s.chat-dw { inset-block: 0; width: 12px; z-index: 6; }
+.chat-dw::after { content: ""; position: absolute; inset-block: calc(50% - 28px); inset-inline-start: 3px; width: 4px; height: 56px; border-radius: 4px; background: var(--line-2); transition: background .15s; }
+.chat-dw:hover::after, .chat-dw:active::after { background: var(--teal); }
+@media (max-width: 700px) { .chat-dw { display: none; } }

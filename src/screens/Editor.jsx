@@ -341,7 +341,7 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
   }, [flush]);
 
   /* ── the analysis ── */
-  const onNotice = (name, x) => setNotes((n) => ({ ...n, [name]: `سيرفر Google زحمة دلوقتي، بنعيد المحاولة تلقائي${x.attempt > 1 ? ` (محاولة ${x.attempt})` : ""}… مفيش داعي تعمل حاجة` }));
+  const onNotice = (name, x) => setNotes((n) => ({ ...n, [name]: `سيرفر Google زحمة دلوقتي، بنعيد المحاولة تلقائي${x.attempt ? ` (محاولة ${x.attempt} من ${x.max || 3})` : ""}… مفيش داعي تعمل حاجة` }));
   const clearNote = (name) => setNotes((n) => (n[name] ? { ...n, [name]: null } : n));
   const onUpdate = (name, data, meta) => {
     clearNote(name);
@@ -506,7 +506,7 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
   const timingLine = [
     timing.ocr && `قراءة ${sec1(timing.ocr.ms)}`,
     timing.words && `كلمات ${sec1(timing.words.ms)}`,
-    !isLesson && timing.reason?.stages && `حلّ ${timing.reason.stages.solve}ث · أساس ${timing.reason.stages.a}ث · تفصيص ${timing.reason.stages.b}ث`,
+    !isLesson && timing.reason?.stages && `حلّ ${timing.reason.stages.solve}ث · شرح وتريكات ${timing.reason.stages.total}ث`,
   ].filter(Boolean).join(" · ");
   const errCount = Object.values(status).filter((s) => s === "error").length;
 

@@ -1,7 +1,7 @@
 {
   "name": "nclex-rn",
   "productName": "NCLEX-RN",
-  "version": "3.22.0",
+  "version": "3.23.0",
   "description": "NCLEX-RN study app (Android via Capacitor, Windows via Electron)",
   "author": "MOSTAFA HAMMAD",
   "private": true,
@@ -14,15 +14,14 @@
     "desktop": "npm run build && electron .",
     "desktop:build": "npm run build && electron-builder --win --x64 --publish never"
   },
-   "dependencies": {
+  "dependencies": {
     "@capacitor/android": "^6.2.0",
     "@capacitor/core": "^6.2.0",
     "@capacitor/splash-screen": "^6.0.3",
+    "@fontsource/cairo": "^5.1.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "@fontsource/cairo": "^5.0.0"
+    "react-dom": "^18.3.1"
   },
-
   "devDependencies": {
     "@capacitor/cli": "^6.2.0",
     "@vitejs/plugin-react": "^4.3.4",
@@ -33,10 +32,20 @@
   "build": {
     "appId": "com.nclexrn.desktop",
     "productName": "NCLEX-RN",
-    "directories": { "output": "release" },
-    "files": ["dist/**/*", "electron/**/*", "assets/icon-only.png", "package.json"],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "assets/icon-only.png",
+      "package.json"
+    ],
     "win": {
-      "target": ["nsis", "portable"],
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "icon": "assets/icon-only.png"
     },
     "nsis": {

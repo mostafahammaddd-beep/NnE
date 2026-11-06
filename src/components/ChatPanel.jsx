@@ -157,6 +157,9 @@ export default function ChatPanel({
   const [note, setNote] = useState("");
   const [over, setOver] = useState(false);
   const [size, setSize] = useState(readSize);
+  const [dw, setDw] = useState(() => { const n = parseInt(prefs.get("nclex:chat:dw", "0"), 10); return n >= MIN_W ? n : 0; });   // width of the question drawer (0 = default)
+  const dwRef = useRef(dw);
+  dwRef.current = dw;
   const vp = useViewport();
   const abortRef = useRef(null);
   const listRef = useRef(null);
@@ -382,7 +385,7 @@ export default function ChatPanel({
   /* ── window size ── */
   const mobile = vp.w <= 700;
   const maxW = Math.max(MIN_W, vp.w - MARGIN * 2), maxH = Math.max(MIN_H, vp.h - MARGIN * 2);
-  const winStyle = !win ? undefined : mobile
+  const winStyle = !win ? (!mobile && dw ? { width: clamp(dw, MIN_W, maxW) } : undefined) : mobile
     ? { height: size.full ? vp.h : clamp(size.h > vp.h ? PRESETS.m.f * vp.h : size.h, 300, vp.h - 6) }
     : { width: size.full ? maxW : clamp(size.w, MIN_W, maxW), height: size.full ? maxH : clamp(size.h, MIN_H, maxH) };
   const persistSize = (z) => { setSize(z); prefs.set("nclex:ai:size", JSON.stringify(z)); };
@@ -396,15 +399,30 @@ export default function ChatPanel({
     dragRef.current = { mode, x: e.clientX, y: e.clientY, w: r.width, h: r.height, rtl: getComputedStyle(el).direction === "rtl" };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
+  const startDw = (e) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    e.preventDefault();
+    const el = e.currentTarget.closest(".chat");
+    dragRef.current = { mode: "dw", x: e.clientX, w: el.getBoundingClientRect().width, rtl: getComputedStyle(el).direction === "rtl" };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const resetDw = () => { setDw(0); prefs.set("nclex:chat:dw", "0"); };
   const moveDrag = (e) => {
     const d = dragRef.current;
     if (!d) return;
+    if (d.mode === "dw") { setDw(clamp(Math.round(d.w + (d.rtl ? e.clientX - d.x : d.x - e.clientX)), MIN_W, maxW)); return; }
     let w = d.w, h = d.h;
     if (d.mode.includes("h")) h = d.h + (d.y - e.clientY);                                  // the window hangs from the bottom: dragging UP makes it taller
     if (d.mode.includes("w")) w = d.w + (d.rtl ? e.clientX - d.x : d.x - e.clientX);         // the inner edge: toward the middle of the screen = wider
     setSize({ w: clamp(w, MIN_W, maxW), h: clamp(h, mobile ? 300 : MIN_H, mobile ? vp.h - 6 : maxH), full: false });
   };
-  const endDrag = () => { if (dragRef.current) { dragRef.current = null; prefs.set("nclex:ai:size", JSON.stringify(sizeRef.current)); } };
+  const endDrag = () => {
+    const d = dragRef.current;
+    if (!d) return;
+    dragRef.current = null;
+    if (d.mode === "dw") prefs.set("nclex:chat:dw", String(dwRef.current));
+    else prefs.set("nclex:ai:size", JSON.stringify(sizeRef.current));
+  };
   const sizeKey = size.full ? "full" : null;
 
   const sugs = suggestions || (ctx.kind === "global" ? SUGGEST_G : SUGGEST_Q);
@@ -417,6 +435,10 @@ export default function ChatPanel({
       onDragOver={(e) => { if (e.dataTransfer?.types?.includes("Files")) { e.preventDefault(); setOver(true); } }}
       onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setOver(false); }}
       onDrop={(e) => { if (e.dataTransfer?.files?.length) { e.preventDefault(); setOver(false); addFiles(e.dataTransfer.files); } }}>
+      {!win && !mobile && (
+        <div className="win-rs win-rs-s chat-dw" role="separator" aria-label="اسحب لتغيير عرض النافذة (دوسة مرتين = الحجم الأصلي)" title="اسحب لتغيير العرض · دوسة مرتين = الأصلي"
+          onPointerDown={startDw} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} onDoubleClick={resetDw} />
+      )}
       {win && !size.full && (
         <>
           <div className="win-rs win-rs-t" role="separator" aria-label="اسحب لتغيير الطول" onPointerDown={startDrag("h")} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}><i /></div>

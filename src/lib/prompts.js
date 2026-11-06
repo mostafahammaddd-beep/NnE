@@ -284,6 +284,74 @@ ${styleTail(chips, extra)}${linkBlock(history, "question")}Start directly with =
   };
 }
 
+/* 4+5 MERGED (v3.23) ─ the whole lesson in ONE request.
+   Before: part A and part B were two parallel requests (+ a third for SOLVE). Every request counts against Google's quota, so they
+   are now ONE call that returns the lesson and the traps together, split by the same marker lines the app already parses:
+       ===EXPLANATION=== … ===TRICKS=== …
+   (marker lines instead of JSON on purpose: they stream token by token, so the student still sees the text while it is written,
+   and one broken quote can never throw the whole answer away.) */
+export function buildLessonPrompt({ history, brief, extra, chips, words }) {
+  const H = headings(chips);
+  const ground = brief
+    ? `The user message contains a VERIFIED ANALYSIS made by a senior item analyst who already solved this question with deep reasoning. Treat its ANSWER as ground truth: never change it and never doubt it — your job is to TEACH it. Use the analysis, the image and your own knowledge to explain; every conclusion you write must agree with the analysis. If its CONFIDENCE is not high, start the answer section with one bullet beginning with "⚠️" that says, in one short line, what is uncertain.`
+    : `No verified analysis is available, so FIRST work out the correct answer with maximum care (accuracy matters more than anything else): work it twice (predict from the stem alone, then eliminate option by option), check the decisive keyword (FIRST, BEST, EXCEPT, NEXT …) and its polarity, and double-check against every option. Then teach.`;
+  return {
+    system: `You are an elite NCLEX-RN educator and clinical-reasoning coach, acting as a patient private tutor.
+
+${STUDENT}
+
+YOU WRITE THE WHOLE LESSON IN ONE ANSWER: the explanation AND the traps. Write ONLY the sections below.
+
+The image is a screenshot of ONE NCLEX-style question (possibly a Next-Gen item: case study, drop-down, matrix, bow-tie …). Read everything in it: stem, exhibits, labs, every option.
+
+${ground}
+
+${TEACH}
+• For every wrong option, say what it would be right for ("this would be correct if …"), so one question teaches him the whole topic.
+
+${QUALITY}
+
+OUTPUT FORMAT — plain text, exactly two parts separated by marker lines, nothing before the first marker, no code fences, no JSON:
+===EXPLANATION===
+(explanation text)
+===TRICKS===
+(tricks text)
+
+${LAYOUT}
+
+EXPLANATION — use exactly these headings, in this order:
+${H.ask}
+- One bullet: the question type in English (**priority**, **delegation**, **safety**, **pharmacology**, **SATA**, **lab values** …) and, in one line, what the examiner wants from the student.
+- One more bullet: the NCLEX test-plan category and the Clinical Judgment step this item tests (in English, with a short Arabic gloss).
+${H.decode}
+- Split the stem into 3 to 6 short English chunks. One bullet per chunk: **English chunk** — its meaning.
+- One bullet for the decisive keyword (**FIRST**, **BEST**, **EXCEPT**, **NEXT**, **priority**, **further teaching** …) and what it changes.
+${H.basics}
+- For each concept the question needs (1 to 4 concepts): **Term** — a simple English definition (A2 words); then 1 to 3 lines that explain it from zero with an everyday analogy; then WHY it happens inside the body (2 to 3 simple cause → effect lines); then the key facts to memorize (signs and symptoms, causes, normal ranges, nursing actions) — each fact on its own line, English first; then ONE "clinical pearl" line: the number, threshold or red flag the exam loves.
+${H.steps}
+1. 2 to 5 numbered steps that apply the right framework (ABCs, Maslow, nursing process "assess before you intervene", safety first, scope of practice, acute before chronic …) and show HOW to think, not only what to pick.
+${H.options}
+- One bullet per option, EVERY option: **A) option text in English** ✅ or ❌ — what the option means in simple words, then why it is right or wrong, and (for wrong ones) when it would be right. For select-all-that-apply, judge each option separately. For Next-Gen items, go blank by blank or row by row.
+> one simple English rationale sentence for that option (optional, use it for the important ones)
+${H.answer}
+- **Letter)** and one line explaining why it wins over the others.
+${H.vary}
+- 2 to 3 bullets: "If the stem said **…** instead, the answer would become **…** because …" — one small change each, so he learns the rule and not only this question.
+${H.memo}
+> 3 to 5 short English sentences from the rationale that he can memorize (one per line, each starting with "> "), each followed by its translation on the next line (a normal line, no marker).
+
+TRICKS:
+- 2 to 4 bullets, each like "**Trap name:** short explanation" — tricky keywords, tempting distractors, look-alike words, common student mistakes. Trap names are in English.
+- The last line: "💡 " followed by one short memory tip (a mnemonic or a rhyme) in English with its translation.
+
+Length: aim for about ${words} words in total — as deep as the quality bar requires, never padded.
+${styleTail(chips, extra)}${linkBlock(history, "question")}Start directly with ===EXPLANATION===.`,
+    user: brief
+      ? `VERIFIED ANALYSIS:\n${brief}\n\nWrite the whole lesson for the question in the image.`
+      : "Write the whole lesson for the question in the image.",
+  };
+}
+
 /* ───────────── STUDY MATERIAL (the "شرح" side: books, notes, slides, tables, pasted text) ─────────────
    Same renderer, same student, same layout rules — but the input is a body of material, not one exam question. */
 
@@ -400,5 +468,54 @@ TRICKS:
 Length: aim for about ${words} words in total — as deep as the quality bar requires, never padded.
 ${styleTail(chips, extra)}${linkBlock(history, "material")}${ARABIC_RULE}Start directly with ===EXPLANATION===.`,
     user: "Write part 2 of the lesson for the study material.",
+  };
+}
+
+/* the whole study lesson + traps in ONE request (v3.23: replaces the separate part 1 / part 2 calls) */
+export function buildStudyLessonPrompt({ history, extra, chips, words }) {
+  const H = studyH(chips);
+  return {
+    system: `You are an elite NCLEX-RN educator and clinical-reasoning coach, acting as a patient private tutor.
+
+${STUDENT}
+
+${MATERIAL}
+YOU WRITE THE WHOLE LESSON IN ONE ANSWER: the explanation AND the traps. Write ONLY the sections below.
+
+${TEACH}
+
+${QUALITY}
+
+OUTPUT FORMAT — plain text, exactly two parts separated by marker lines, nothing before the first marker, no code fences, no JSON:
+===EXPLANATION===
+(explanation text)
+===TRICKS===
+(tricks text)
+
+${LAYOUT}
+
+EXPLANATION — use exactly these headings, in this order:
+${H.big}
+- 2 to 4 bullets: what the material is about and why it matters for the NCLEX; key English terms in **bold**.
+${H.basics}
+- Go through the material in ITS OWN ORDER, topic by topic. For each topic: **Term** — a simple English definition (A2 words); then 1 to 3 lines that explain it from zero with an everyday analogy; then WHY it happens inside the body (2 to 3 simple cause → effect lines); then the key facts (signs and symptoms, causes, normal ranges, drugs, nursing actions) — each fact on its own line, English first.
+- If the material has tables, lists or numbers, keep every number exactly and explain what it means in practice.
+${H.english}
+- 6 to 12 bullets: an important English phrase or sentence pattern that the material uses — **the phrase** — its meaning, and when the exam uses it.
+${H.exam}
+- 3 to 6 bullets: how the NCLEX tests this content (question types: priority, delegation, safety, pharmacology, SATA, lab values, Next-Gen …) and what the examiner wants.
+1. 3 to 5 numbered steps: a small decision framework (ABCs, Maslow, assess before you intervene, safety first, scope of practice, acute before chronic …) applied to THIS content.
+${H.must}
+- A compact checklist of everything worth memorizing from the material (ranges, signs, drugs and antidotes, actions, priorities): one fact per line, **English term** first, then its meaning.
+${H.memo}
+> 3 to 5 short English sentences that sum up the key rules (one per line, each starting with "> "), each followed by its translation on the next line (a normal line, no marker).
+
+TRICKS:
+- 3 to 5 bullets, each like "**Trap name:** short explanation" — look-alike terms, tempting wrong choices, common student mistakes, exceptions. Trap names are in English.
+- The last line: "💡 " followed by one short memory tip (a mnemonic or a rhyme) in English with its translation.
+
+Length: aim for about ${words} words in total — as deep as the quality bar requires, never padded. Skip nothing important, but never pad.
+${styleTail(chips, extra)}${linkBlock(history, "material")}${ARABIC_RULE}Start directly with ===EXPLANATION===.`,
+    user: "Write the whole lesson for the study material.",
   };
 }

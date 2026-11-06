@@ -1,11 +1,20 @@
 /* ───────────── Gemini networking ─────────────
-   Goals: first text on screen in ~1–2 s, never block on housekeeping calls, never wait for a slow
+   v3.23 — 429 / 503 FIX (read this first)
+   • NO MORE HEDGING: the old engine started a SECOND request to another model whenever the first was slow. Google counts every
+     request, so a busy moment doubled the traffic and kept the key rate-limited. Now there is exactly ONE request at a time.
+   • withBackoff(): a transient failure (429 per-minute · 500/502/503/504 · timeout · dropped line · empty reply) is retried at most
+     3 times, after 2 s, 4 s, 8 s (+ a random jitter so parallel tasks never retry in the same millisecond). A "retry in Ns" hint
+     from Google is honoured (up to 20 s); a longer one stops at once. After that the student gets a calm "try again in a minute"
+     message instead of an endless loop. Dead models (404 / retired / daily quota) are skipped WITHOUT waiting.
+   • The API key travels in the `x-goog-api-key` header (the documented way) instead of the URL, so it never lands in logs.
+   • The model is configurable: VITE_GEMINI_MODEL (default gemini-2.5-flash) and VITE_GEMINI_MODEL_PRO — see config.js.
+
+   Older goals (still true): first text on screen in ~1–2 s, never block on housekeeping calls, never wait for a slow
    model when another one can answer.
 
    • STREAMING (SSE) through the WebView fetch → text is shown while it is still being written.
    • NO blocking "list models" round trip before analysing (cached list + safe defaults; refreshed in background).
-   • HEDGED fallback: if a model has not produced its first token after `hedgeMs`, the next model is started
-     in parallel and the first one to answer wins (an overloaded model can no longer stall the whole task).
+   • (v3.23: the old "hedged" parallel fallback was REMOVED — it doubled the request count during busy moments.)
    • Thinking level is remembered per model (no repeated 400 round trips).
    • "Sign of life" = any streamed part, INCLUDING Gemini's thought summaries (includeThoughts). A model that is
      busy thinking is therefore never mistaken for a stalled one (no wasted duplicate requests), and a model that
@@ -21,11 +30,15 @@
      (non-streaming) automatically.                                                                       */
 
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
+import { MODEL_FAST, MODEL_PRO } from "./config.js";
 
 const ENV = (typeof import.meta !== "undefined" && import.meta.env) || {};
 import { trackRequest, noteQuota } from "./usage.js";
 export const ENV_KEY = ENV.VITE_GEMINI_API_KEY || "";
 export const API_BASE = ENV.VITE_API_BASE || "https://generativelanguage.googleapis.com/v1beta/models";
+
+/* the key goes in a header, never in the URL */
+const hdrs = (apiKey) => ({ "Content-Type": "application/json", ...(apiKey ? { "x-goog-api-key": apiKey } : {}) });
 
 /* ── errors ── */
 
@@ -36,11 +49,11 @@ export function friendlyError(status, message) {
   if (/api key|api_key/.test(m) || status === 401 || status === 403)
     return "مفتاح الـ API مش مقبول أو مالوش صلاحية. اتأكد من المفتاح من أيقونة 🔑 فوق.";
   if (status === 429 && /per\s?day|daily|perday/.test(m)) return "خلصت حصة الطلبات اليومية بتاعة مفتاحك. بتتجدد منتصف الليل بتوقيت المحيط الهادي، أو استخدم مفتاح تاني.";
-  if (status === 429) return "وصلت للحد المسموح من الطلبات. استنى دقيقة وجرّب تاني.";
+  if (status === 429) return "السيرفر عليه ضغط عالي دلوقتي 🙏 استنى دقيقة وجرّب تاني.";
   if (status === 404 && RETIRED_RE.test(m)) return "الموديل ده اتقفل على المفاتيح الجديدة. التطبيق بيحوّل لموديل أحدث لوحده، جرّب تاني.";
   if (status === 400 && /pdf|document/.test(m)) return "ملف الـ PDF مش مقروء أو مش مدعوم. جرّب ملف تاني أو صوّر الصفحة.";
   if (status === 400 && m.includes("image")) return "الصورة مش واضحة أو مش مدعومة. جرّب صورة تانية.";
-  if (status >= 500) return "سيرفرات Google مشغولة دلوقتي. جرّب تاني بعد شوية.";
+  if (status >= 500) return "سيرفرات Google مشغولة دلوقتي 🙏 استنى دقيقة وجرّب تاني.";
   return "حصلت مشكلة أثناء التحليل.";
 }
 
@@ -93,11 +106,11 @@ function normalizeResponse(status, data) {
   return { status, json: json && typeof json === "object" ? json : {} };
 }
 
-export async function rawRequest(method, url, body, timeoutMs) {
+export async function rawRequest(method, url, body, timeoutMs, apiKey) {
   const errors = [];
   if (Capacitor.isNativePlatform()) {
     try {
-      const opts = { url, method, headers: { "Content-Type": "application/json" }, connectTimeout: 30000, readTimeout: timeoutMs };
+      const opts = { url, method, headers: hdrs(apiKey), connectTimeout: 30000, readTimeout: timeoutMs };
       if (body !== undefined) opts.data = body;
       const r = await CapacitorHttp.request(opts);
       return normalizeResponse(r.status, r.data);
@@ -106,7 +119,7 @@ export async function rawRequest(method, url, body, timeoutMs) {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    const init = { method, headers: { "Content-Type": "application/json" }, signal: ctrl.signal };
+    const init = { method, headers: hdrs(apiKey), signal: ctrl.signal };
     if (body !== undefined) init.body = JSON.stringify(body);
     const res = await fetch(url, init);
     const text = await res.text();
@@ -123,8 +136,8 @@ export async function rawRequest(method, url, body, timeoutMs) {
 /* Only "-latest" aliases + the current generation: Google moves the aliases forward by itself, so these keep working
    when a specific model is retired. gemini-2.5-* is NOT here on purpose (404 for every key that never used it). */
 const DEFAULT_LISTS = {
-  fast: ["gemini-flash-latest", "gemini-flash-lite-latest"],
-  pro: ["gemini-pro-latest", "gemini-3.1-pro-preview"],
+  fast: [MODEL_FAST, "gemini-flash-latest", "gemini-flash-lite-latest"],
+  pro: [MODEL_PRO, "gemini-pro-latest", "gemini-3.1-pro-preview"],
 };
 const LS_MODELS = "nclex:models:v5";
 const keyTag = (k) => (k || "").slice(-8);
@@ -194,9 +207,12 @@ const withSuggestions = (apiKey, lists) => {
   const dead = deadSet(apiKey);
   const extra = readSuggest(apiKey).filter((m) => !dead.has(m));
   const ok = (arr) => arr.filter((m) => !deadState(apiKey).ret[m] || deadState(apiKey).ret[m] <= Date.now());
-  const pro = [...extra.filter((m) => /pro/.test(m)), ...lists.pro];
-  const fast = [...extra.filter((m) => !/pro/.test(m)), ...lists.fast];
-  return { fast: [...new Set(ok(fast))], pro: [...new Set(ok(pro))] };
+  /* the model YOU configured is always tried first (unless Google says it is retired / unavailable for this key) */
+  const pro = [MODEL_PRO, ...extra.filter((m) => /pro/.test(m)), ...lists.pro];
+  const fast = [MODEL_FAST, ...extra.filter((m) => !/pro/.test(m)), ...lists.fast];
+  const live = (arr) => [...new Set(ok(arr))].filter((m) => !dead.has(m));
+  const f = live(fast), p = live(pro);
+  return { fast: f.length ? f : [...new Set(ok(fast))], pro: p.length ? p : [...new Set(ok(pro))] };
 };
 
 export function getModelLists(apiKey) {
@@ -222,7 +238,7 @@ export async function refreshModels(apiKey, { force = false } = {}) {
       if (raw && raw.k === keyTag(apiKey) && Date.now() - raw.t < 864e5) { _lists = null; return getModelLists(apiKey); }
     } catch (e) { /* ignore */ }
   }
-  const { status, json } = await rawRequest("GET", `${API_BASE}?pageSize=200&key=${encodeURIComponent(apiKey)}`, undefined, 30000);
+  const { status, json } = await rawRequest("GET", `${API_BASE}?pageSize=200`, undefined, 30000, apiKey);
   if (status !== 200) throw classify(status, json?.error?.message || "");
   const all = (json.models || [])
     .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent") && /^models\/gemini-/.test(m.name)
@@ -264,7 +280,7 @@ export function warmConnection(apiKey) {
   if (!apiKey || Date.now() - _warmAt < 45000) return;
   _warmAt = Date.now();
   try {
-    fetch(`${API_BASE}?pageSize=1&key=${encodeURIComponent(apiKey)}`, { method: "GET", cache: "no-store" })
+    fetch(`${API_BASE}?pageSize=1`, { method: "GET", cache: "no-store", headers: hdrs(apiKey) })
       .then((r) => r.arrayBuffer()).catch(() => {});
   } catch (e) { /* ignore */ }
 }
@@ -311,7 +327,7 @@ function readParts(json) {
 
 async function fetchStream({ apiKey, model, body, signal, onText, onAlive, firstMs, idleMs = 45000 }) {
   if (signal.aborted) throw abortError();
-  const url = `${API_BASE}/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
+  const url = `${API_BASE}/${model}:streamGenerateContent?alt=sse`;
   const ctrl = new AbortController();
   const link = () => ctrl.abort();
   signal.addEventListener("abort", link);
@@ -337,7 +353,7 @@ async function fetchStream({ apiKey, model, body, signal, onText, onAlive, first
   try {
     let res;
     try {
-      res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: ctrl.signal });
+      res = await fetch(url, { method: "POST", headers: hdrs(apiKey), body: JSON.stringify(body), signal: ctrl.signal });
     } catch (e) {
       if (signal.aborted) throw abortError();
       if (why) throw timeoutError(why);
@@ -382,10 +398,10 @@ async function fetchStream({ apiKey, model, body, signal, onText, onAlive, first
 
 /* Native (non-streaming) fallback — used only if WebView fetch cannot reach Google. */
 async function nativeOnce({ apiKey, model, body, signal, onText, onAlive }) {
-  const url = `${API_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const url = `${API_BASE}/${model}:generateContent`;
   let r;
   try {
-    r = await CapacitorHttp.request({ url, method: "POST", headers: { "Content-Type": "application/json" }, data: body, connectTimeout: 30000, readTimeout: 300000 });
+    r = await CapacitorHttp.request({ url, method: "POST", headers: hdrs(apiKey), data: body, connectTimeout: 30000, readTimeout: 300000 });
   } catch (e) {
     if (signal.aborted) throw abortError();
     const msg = String((e && e.message) || e);
@@ -439,13 +455,51 @@ async function attemptModel({ apiKey, model, task, system, parts, spec, maxOut, 
   }
 }
 
-/* ── hedged race between models ──
-   A model "claims" the race with its FIRST sign of life (a thought summary or visible text). From then on the
-   other candidates are cancelled. If the claimer dies before anything was shown, the race re-opens and the next
-   model starts at once; if text was already shown, the error is reported (we never silently switch mid-answer). */
+/* ── retry engine: ONE request at a time, smart exponential backoff with jitter ── */
 
-/* When every model failed, show the error that tells the student what to DO, not just the last one that happened to fail:
-   a rate limit / server / network / timeout error beats "this model is unavailable". */
+export const BACKOFF = { retries: 3, baseMs: 2000, jitterMs: 1000, maxHintMs: 20000 };
+
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  if (signal && signal.aborted) return reject(abortError());
+  const t = setTimeout(() => { signal && signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+  const onAbort = () => { clearTimeout(t); reject(abortError()); };
+  signal && signal.addEventListener("abort", onAbort, { once: true });
+});
+
+/* The calm message shown after the last retry. Keeps the technical detail for the (i) tooltip. */
+export function busyError(last) {
+  const e = new Error("السيرفر عليه ضغط عالي دلوقتي 🙏 استنى دقيقة وجرّب تاني.");
+  e.detail = (last && last.detail) || "";
+  e.status = last && last.status;
+  e.busy = true;
+  return e;
+}
+
+/* Which failures are worth another try? "Google is busy / the line dropped" is; a bad key, a blocked question, a dead model
+   (404 / daily quota) or a bad file is not: retrying cannot change the answer. */
+export const isTransient = (e) => !!e && !e.fatal && !e.dead && !e.blocked && !e.thinking &&
+  (e.timeout || e.interrupted || e.netBeforeStart || e.emptyReply || [408, 429, 500, 502, 503, 504].includes(e.status));
+
+/* withBackoff(fn): runs fn(); on a transient error waits 2 s → 4 s → 8 s (+ random jitter) and runs it again, at most 3 retries.
+   Then it throws busyError (never loops forever). onRetry({ attempt, max, waitMs, status }) lets the UI say "trying again". */
+export async function withBackoff(fn, { signal, onRetry, retries = BACKOFF.retries, baseMs = BACKOFF.baseMs, jitterMs = BACKOFF.jitterMs } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await fn(attempt); }
+    catch (e) {
+      if (!e || e.name === "AbortError" || (signal && signal.aborted)) throw e;
+      if (!isTransient(e)) throw e;
+      /* a timeout means the model hung for minutes: one more try at most, not three */
+      if (attempt >= retries || (e.timeout && attempt >= 1)) throw busyError(e);
+      const hint = e.retryAfterMs || 0;
+      if (hint > BACKOFF.maxHintMs) throw busyError(e);              // Google itself says "come back in 30 s+": do not burn quota
+      const waitMs = Math.round(Math.max(baseMs * 2 ** attempt, hint) + Math.random() * jitterMs);   // 2 s, 4 s, 8 s + jitter
+      if (onRetry) onRetry({ attempt: attempt + 1, max: retries, waitMs, status: e.status || null });
+      await sleep(waitMs, signal);
+    }
+  }
+}
+
+/* When every model failed, show the error that tells the student what to DO */
 function bestError(errs, tried) {
   const real = errs.filter((e) => !e.dead);
   const daily = errs.filter((e) => e.daily);
@@ -458,168 +512,50 @@ function bestError(errs, tried) {
   return e;
 }
 
-/* ── model health board (shared by every task of the app) ──
-   A 503 / 429-per-minute / timeout is a statement about ONE model at THIS moment. The first task that hits it puts the
-   model on a short, growing cool-down; every other task (they all run in parallel) skips it at once instead of each paying
-   its own failed round trip, and the model is tried again automatically when the cool-down ends. */
-const BOARD = new Map();
-const bKey = (apiKey, model) => `${keyTag(apiKey)}|${model}`;
-const bGet = (apiKey, model) => BOARD.get(bKey(apiKey, model)) || { until: 0, fails: 0, at: 0 };
-function coolDown(apiKey, model, err) {
-  const b = bGet(apiKey, model), now = Date.now();
-  if (now - b.at > 3000) b.fails = Math.min(b.fails + 1, 6);      // 5 parallel tasks failing together count once
-  b.at = now;
-  const base = err && err.retryAfterMs ? err.retryAfterMs : Math.min(20000, 1500 * 2 ** (b.fails - 1));   // 1.5 → 3 → 6 → 12 → 20 s
-  b.until = Math.max(b.until, now + base * (0.8 + Math.random() * 0.4));                                   // jitter: no thundering herd
-  BOARD.set(bKey(apiKey, model), b);
-}
-const markGood = (apiKey, model) => BOARD.delete(bKey(apiKey, model));
-const isLite = (m) => /lite/.test(m);
-
-/* Which failures are worth another try? Everything that says "Google is busy / the line dropped" is; a bad key, a blocked
-   question or a bad file is not (retrying cannot change the answer). */
-const isTransient = (e) => !!e && !e.fatal && !e.dead && !e.blocked && !e.thinking &&
-  (e.timeout || e.interrupted || e.netBeforeStart || e.emptyReply || [408, 429, 500, 502, 503, 504].includes(e.status));
-
-const MAX_WAIT_MS = 10 * 60e3;       // a transient outage is waited out for up to 10 minutes before the student ever sees an error
-const LITE_AFTER_MS = 45e3;          // quality tasks fall back to a "lite" model only after the stronger ones failed this long
-
-function raceModels({ apiKey, models, run, task, hedgeMs, signal, onText, onNotice }) {
-  return new Promise((resolve, reject) => {
-    const order = [...new Set(models)];
-    if (!order.length) return reject(new Error("مفيش موديل متاح دلوقتي."));
-
-    const t0 = Date.now();
-    const liteTask = /^ocr/.test(task || "");                  // copying text from an image: a lite model is as good as any. (Judging word LEVELS is not: lite models list easy words.)
-    const ctrls = new Map();                                   // model → AbortController of its running attempt
-    const errs = [], tried = [];
-    let winner = null, shown = false, shownLen = 0, settled = false, hedgeTimer = null, wakeTimer = null;
-    let attempts = 0, netFails = 0, emptyFails = 0, hedges = 0;
-    const raceDead = new Set();                                // models that cannot answer THIS request (404 / bad config): never retried inside this race
-
-    const clearTimers = () => { clearTimeout(hedgeTimer); clearTimeout(wakeTimer); };
-    const finish = (fn) => {
-      if (settled) return;
-      settled = true;
-      clearTimers();
-      ctrls.forEach((c) => c.abort());
-      signal && signal.removeEventListener("abort", onAbort);
-      fn();
-    };
-    const onAbort = () => finish(() => reject(abortError()));
-    if (signal) {
-      if (signal.aborted) return reject(abortError());
-      signal.addEventListener("abort", onAbort);
-    }
-
-    const liveModels = () => {
-      const d = deadSet(apiKey);
-      const l = order.filter((m) => !d.has(m) && !raceDead.has(m));
-      /* everything is remembered as unavailable (e.g. a routing hiccup marked them all) → give them one honest chance anyway */
-      return l.length || attempts > 0 ? l : order.filter((m) => !raceDead.has(m));
-    };
-    const liteAllowed = () => liteTask || Date.now() - t0 > LITE_AFTER_MS || liveModels().every(isLite);   // no stronger model left alive → nothing to wait for
-    /* a model that may be started right now: alive, not cooling down, not already running, "lite" only when allowed */
-    const readyModels = () => liveModels().filter((m) => !ctrls.has(m) && bGet(apiKey, m).until <= Date.now() && (!isLite(m) || liteAllowed()));
-
-    const claim = (model) => {
-      if (settled) return false;
-      if (winner === null) {
-        winner = model;
-        clearTimeout(hedgeTimer);
-        markGood(apiKey, model);
-        ctrls.forEach((c, m) => { if (m !== model) c.abort(); });
-      }
-      return winner === model;
-    };
-
-    const armHedge = () => {
-      clearTimeout(hedgeTimer);
-      if (settled || winner !== null || !hedgeMs || hedges >= 2) return;
-      hedgeTimer = setTimeout(() => {
-        if (settled || winner !== null) return;
-        const nxt = readyModels().filter((m) => liteTask || !isLite(m));
-        if (nxt.length) { hedges++; launch(nxt[0]); }
-        armHedge();
-      }, hedgeMs);
-    };
-
-    /* nothing running → start the best model that is ready; otherwise sleep until the first cool-down ends */
-    const pump = () => {
-      if (settled || winner !== null || ctrls.size) return;
-      clearTimeout(wakeTimer);
-      const live = liveModels();
-      if (!live.length) return finish(() => reject(bestError(errs, tried)));
-      if (Date.now() - t0 > MAX_WAIT_MS) return finish(() => reject(bestError(errs, tried)));
-      const ready = readyModels();
-      if (ready.length) return launch(ready[0]);
-      /* everything is cooling down (or only "lite" is left and not yet allowed): wait, politely, and tell the UI */
-      const soonest = Math.min(...live.filter((m) => !isLite(m) || liteAllowed()).map((m) => bGet(apiKey, m).until), t0 + LITE_AFTER_MS + 500);
-      const wait = Math.max(400, Math.min(soonest - Date.now(), 20000));
-      if (onNotice) onNotice({ waitMs: wait, attempt: attempts, status: errs.length ? errs[errs.length - 1].status : null });
-      wakeTimer = setTimeout(pump, wait);
-    };
-
-    function launch(model) {
-      if (settled || ctrls.has(model)) return;
-      const ctrl = new AbortController();
-      ctrls.set(model, ctrl);
-      attempts++;
-      run(
-        model, ctrl.signal,
-        (text) => {
-          if (!claim(model)) return;
-          if (text.length < shownLen) return;            // a resumed answer re-writes from the start: keep the old text on screen until it catches up
-          shown = true; shownLen = text.length;
-          onText(text, model);
-        },
-        () => { claim(model); },
-      ).then((res) => {
-        ctrls.delete(model);
-        if (settled || !claim(model)) return;
-        finish(() => resolve({ ...res, model }));
-      }).catch((e0) => {
-        const err = e0 || new Error("unknown");
-        ctrls.delete(model);
-        if (settled || ctrl.signal.aborted) return;       // lost the race on purpose
-        tried.push(`${model} → ${err.status || (err.timeout ? "timeout" : err.emptyReply ? "empty" : "net")}${err.retired ? " (retired)" : ""}`);
-        errs.push(err);
-
-        if (err.dead) addDead(apiKey, model, !!err.retired);
-        if (err.retired) {
-          if (err.replacement) {
-            addSuggest(apiKey, err.replacement);
-            if (!order.includes(err.replacement) && !deadSet(apiKey).has(err.replacement)) order.unshift(err.replacement);
-          }
-          selfHeal(apiKey);
-        }
-        if (err.fatal) return finish(() => reject(err));
-        if (err.blocked) return finish(() => reject(err));                           // blocked by Google's safety filter: another try cannot help
-        if (err.dead || !isTransient(err)) raceDead.add(model);                       // this model cannot answer this request → others only
-
-        if (err.netBeforeStart && ++netFails >= 4) return finish(() => reject(err));  // really offline: do not keep the student waiting
-        if (err.emptyReply && ++emptyFails >= 3) return finish(() => reject(err));
-        if (isTransient(err)) coolDown(apiKey, model, err);
-
-        if (winner === model) winner = null;              // it died while answering (or thinking): resume on another / the same model
-        if (winner === null) { pump(); armHedge(); }
-      });
-      armHedge();
-    }
-    pump();
-  });
-}
-
-/* public: run one task against a list of candidate models */
-export function runTask({ apiKey, models, task, system, parts, spec, maxOut, hedgeMs, firstMs, idleMs, signal, onText, onNotice }) {
-  /* callers that only want the final text (word meaning, picture prompt, topics …) pass no onText / signal:
-     the engine calls both unconditionally, so give it harmless defaults here, once, for every caller */
+/* public: run one task. Models are tried IN ORDER and only when the previous one is DEAD for this key (404 / retired / daily quota);
+   a busy model is retried with backoff, it is never duplicated onto another model. `hedgeMs` is accepted and ignored (old callers). */
+export async function runTask({ apiKey, models, task, system, parts, spec, maxOut, firstMs, idleMs, signal, onText, onNotice }) {
+  /* callers that only want the final text pass no onText / signal: give the engine harmless defaults once */
   if (typeof onText !== "function") onText = () => {};
   if (!signal) signal = new AbortController().signal;
-  return raceModels({
-    apiKey, models, task, hedgeMs, signal, onText, onNotice,
-    run: (model, sig, emit, alive) => attemptModel({ apiKey, model, task, system, parts, spec, maxOut, signal: sig, onText: emit, onAlive: alive, firstMs, idleMs }),
-  });
+  if (signal.aborted) throw abortError();
+
+  const order = [...new Set(models)];
+  if (!order.length) throw new Error("مفيش موديل متاح دلوقتي.");
+  const errs = [], tried = [];
+  let shownLen = 0;
+
+  for (let i = 0; i < order.length; i++) {
+    const model = order[i];
+    if (deadSet(apiKey).has(model) && i < order.length - 1) continue;          // remembered as unavailable → do not waste a round trip
+    const emit = (text) => {
+      if (text.length < shownLen) return;       // a retried answer re-writes from the start: keep the old text on screen until it catches up
+      shownLen = text.length;
+      onText(text, model);
+    };
+    try {
+      const res = await withBackoff(
+        () => attemptModel({ apiKey, model, task, system, parts, spec, maxOut, signal, onText: emit, onAlive: () => {}, firstMs, idleMs }),
+        { signal, onRetry: (x) => { tried.push(`${model} → ${x.status || "retry"}`); onNotice && onNotice(x); } },
+      );
+      return { ...res, model };
+    } catch (err) {
+      if (!err || err.name === "AbortError" || signal.aborted) throw err || abortError();
+      tried.push(`${model} → ${err.status || (err.timeout ? "timeout" : err.emptyReply ? "empty" : "net")}${err.retired ? " (retired)" : ""}`);
+      errs.push(err);
+      if (err.fatal || err.blocked || err.busy) throw err;                        // bad key · safety filter · retries used up: stop, do not hop to other models
+      if (!err.dead) throw err;                                                    // not a dead model → not a reason to try another one
+      addDead(apiKey, model, !!err.retired);
+      if (err.retired) {
+        if (err.replacement) {
+          addSuggest(apiKey, err.replacement);
+          if (!order.includes(err.replacement) && !deadSet(apiKey).has(err.replacement)) order.splice(i + 1, 0, err.replacement);
+        }
+        selfHeal(apiKey);
+      }
+    }
+  }
+  throw bestError(errs, tried);
 }
 
 
@@ -637,7 +573,7 @@ async function imageModels(apiKey) {
   } catch (e) { /* ignore */ }
   let names = [];
   try {
-    const r = await rawRequest("GET", `${API_BASE}?pageSize=200&key=${encodeURIComponent(apiKey)}`, undefined, 20000);
+    const r = await rawRequest("GET", `${API_BASE}?pageSize=200`, undefined, 20000, apiKey);
     names = ((r.json && r.json.models) || [])
       .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent") && /image|banana/i.test(m.name) && !/imagen/i.test(m.name))
       .map((m) => m.name.replace(/^models\//, ""));
@@ -654,10 +590,10 @@ export async function generateImage({ apiKey, prompt, parts = [], signal }) {
   for (const model of models) {
     if (signal && signal.aborted) throw abortError();
     trackRequest(model);
-    const url = `${API_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const url = `${API_BASE}/${model}:generateContent`;
     const body = { contents: [{ role: "user", parts: [...parts, { text: prompt }] }], generationConfig: { responseModalities: ["TEXT", "IMAGE"] } };
     let r;
-    try { r = await rawRequest("POST", url, body, 170000); }
+    try { r = await rawRequest("POST", url, body, 170000, apiKey); }
     catch (e) { last = e; continue; }
     if (signal && signal.aborted) throw abortError();
     if (r.status === 200) {

@@ -1,5 +1,13 @@
 /* ───────────── Static config ───────────── */
 
+/* ── Which Gemini model the app uses ──
+   Change it WITHOUT touching the code: put VITE_GEMINI_MODEL=gemini-3.5-flash-lite (or any other Flash model id) in `.env`
+   (or in the GitHub workflow env next to VITE_GEMINI_API_KEY) and rebuild. Same for the strong "deep" model: VITE_GEMINI_MODEL_PRO.
+   If Google says a model is retired / unavailable for your key, the app drops it and moves to the "-latest" aliases by itself. */
+const ENV = (typeof import.meta !== "undefined" && import.meta.env) || {};
+export const MODEL_FAST = String(ENV.VITE_GEMINI_MODEL || "gemini-2.5-flash").trim();
+export const MODEL_PRO = String(ENV.VITE_GEMINI_MODEL_PRO || "gemini-pro-latest").trim();
+
 export const CHIPS = [
   { id: "egy", label: "شرح بالبلدي 🇪🇬", icon: "chat", excludes: "en",
     rule: "Write the teaching text in casual Egyptian Arabic (عامية مصرية), like a friendly senior nurse coaching a junior. Keep every medical term and every English exam phrase in English." },
@@ -53,20 +61,20 @@ export const EMPTY_RESULT = { original_question_text: "", new_words: "", explana
    solve : tier = which model family thinks · levels (Gemini 3) / budget (Gemini 2.5) = how hard it thinks
    write : the fast model that writes the lesson · words = length cap per part (parts run in parallel)
    maxOut counts the hidden "thinking" tokens too, so it must stay far above the visible text.
-   hedgeMs = how long a model may show NO sign of life (not even a thought summary) before a second one starts. */
+   (v3.23: `hedgeMs` was removed — a slow model is no longer duplicated onto a second one, that doubled the quota use.) */
 export const MODES = {
   balanced: {
     id: "balanced", label: "متوازن", sub: "", icon: "scale",
-    solve: { tier: "fast", levels: ["medium", "low"], budget: 4096, maxOut: 16000, hedgeMs: 12000, idleMs: 60000, firstMs: 120000 },
-    write: { tier: "fast", levels: ["minimal", "low"], budget: 0, maxOut: 16000, hedgeMs: 7000, idleMs: 60000, firstMs: 90000, words: { a: 680, b: 980 } },
+    solve: { tier: "fast", levels: ["medium", "low"], budget: 4096, maxOut: 16000, idleMs: 60000, firstMs: 120000 },
+    write: { tier: "fast", levels: ["minimal", "low"], budget: 0, maxOut: 16000, idleMs: 60000, firstMs: 90000, words: { a: 680, b: 980 } },
     /* part A needs no answer, so it starts at second 0 and runs while the answer is still being solved → it can afford to THINK */
-    writeA: { tier: "fast", levels: ["low", "minimal"], budget: 1024, maxOut: 20000, hedgeMs: 9000, idleMs: 60000, firstMs: 100000 },
+    writeA: { tier: "fast", levels: ["low", "minimal"], budget: 1024, maxOut: 20000, idleMs: 60000, firstMs: 100000 },
   },
   deep: {
     id: "deep", label: "دقة قصوى", sub: "أعمق تفكير", icon: "target",
-    solve: { tier: "pro", levels: ["high"], budget: 16384, maxOut: 40000, hedgeMs: 40000, idleMs: 150000, firstMs: 240000 },
-    write: { tier: "fast", levels: ["low", "minimal"], budget: 1024, maxOut: 24000, hedgeMs: 9000, idleMs: 90000, firstMs: 120000, words: { a: 850, b: 1300 } },
-    writeA: { tier: "fast", levels: ["medium", "low"], budget: 2048, maxOut: 24000, hedgeMs: 11000, idleMs: 90000, firstMs: 140000 },
+    solve: { tier: "pro", levels: ["high"], budget: 16384, maxOut: 40000, idleMs: 150000, firstMs: 240000 },
+    write: { tier: "fast", levels: ["low", "minimal"], budget: 1024, maxOut: 24000, idleMs: 90000, firstMs: 120000, words: { a: 850, b: 1300 } },
+    writeA: { tier: "fast", levels: ["medium", "low"], budget: 2048, maxOut: 24000, idleMs: 90000, firstMs: 140000 },
   },
 };
 

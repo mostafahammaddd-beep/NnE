@@ -87,12 +87,30 @@ function parseBlocks(text) {
   return out;
 }
 
+/* a bullet written as  Term — meaning — meaning  is shown as a short title line + one line per part (easier to scan, no long mixed Arabic/English line) */
+function splitLi(s) {
+  const segs = String(s || "").split(/\s[—–]\s/).map((x) => x.trim()).filter(Boolean);
+  if (segs.length < 2 || segs[0].length > 80) return null;
+  return { head: segs[0], rest: segs.slice(1) };
+}
+
 function Block({ b }) {
   switch (b.t) {
     case "h":
       return <h4><i /><span><Inline text={b.s} /></span></h4>;
-    case "li":
-      return <div className="li" dir={dirOf(b.s)} data-v={b.v || undefined}><em /><p><Inline text={b.s} /></p></div>;
+    case "li": {
+      const sp = splitLi(b.s);
+      if (!sp) return <div className="li" dir={dirOf(b.s)} data-v={b.v || undefined}><em /><p><Inline text={b.s} /></p></div>;
+      /* "Term — meaning — Arabic gloss" → the term on its own line, every part after it on its own calmer line */
+      return (
+        <div className="li" dir={dirOf(b.s)} data-v={b.v || undefined}><em />
+          <div className="li-body">
+            <p className="li-head" dir={dirOf(sp.head)}><Inline text={sp.head} /></p>
+            {sp.rest.map((r, i) => <p key={i} className="li-sub" dir={dirOf(r)}><Inline text={r} /></p>)}
+          </div>
+        </div>
+      );
+    }
     case "num":
       return <div className="num" dir={dirOf(b.s)}><b>{b.n}</b><p><Inline text={b.s} /></p></div>;
     case "quote":

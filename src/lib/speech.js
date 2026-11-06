@@ -142,7 +142,7 @@ async function fetchPcm(text) {
   let last = new Error("tts failed");
   for (const model of order) {
     try {
-      const { status, json } = await rawRequest("POST", `${API_BASE}/${model}:generateContent?key=${encodeURIComponent(_key)}`, body, Math.min(90000, 15000 + text.length * 70));   // a selected sentence needs longer than one word
+      const { status, json } = await rawRequest("POST", `${API_BASE}/${model}:generateContent`, body, Math.min(90000, 15000 + text.length * 70), _key);   // a selected sentence needs longer than one word
       if (status >= 200 && status < 300) {
         const part = (json?.candidates?.[0]?.content?.parts || []).find((p) => p.inlineData && p.inlineData.data);
         if (part) { goodModel = model; return part.inlineData.data; }
