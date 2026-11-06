@@ -1,0 +1,53 @@
+name: Build Desktop (Windows)
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Finds the app folder (the one that holds package.json) automatically, so the build works whether the
+      # files were uploaded to the repo root or inside a sub-folder (e.g. "nclex-rn-app/").
+      - name: Locate project folder
+        id: proj
+        shell: bash
+        run: |
+          DIR=""
+          for f in $(find . -maxdepth 4 -name package.json -not -path '*/node_modules/*' -not -path './.git/*' | awk '{print length, $0}' | sort -n | cut -d' ' -f2-); do
+            if grep -q '"name"[[:space:]]*:[[:space:]]*"nclex-rn"' "$f"; then DIR=$(dirname "$f"); break; fi
+          done
+          if [ -z "$DIR" ]; then
+            echo "::error::package.json (name: nclex-rn) was not found in this repository. Upload the project files themselves (package.json, src/, electron/ ...) to the repo."
+            find . -maxdepth 3 -not -path './.git/*' | head -60
+            exit 1
+          fi
+          echo "Project folder: $DIR"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        working-directory: ${{ steps.proj.outputs.dir }}
+        run: npm install
+
+      - name: Build web app + Windows installer
+        working-directory: ${{ steps.proj.outputs.dir }}
+        run: npm run desktop:build
+        env:
+          # Optional: same GEMINI_API_KEY secret as the APK build
+          VITE_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Upload installer + portable exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: NCLEX-RN-windows
+          path: |
+            ${{ steps.proj.outputs.dir }}/release/NCLEX-RN-Setup-*.exe
+            ${{ steps.proj.outputs.dir }}/release/NCLEX-RN-Portable-*.exe

@@ -1,0 +1,379 @@
+import { syncUsageKey } from "./lib/usage.js";
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import Icon from "./components/Icon.jsx";
+import BackupModal from "./components/BackupModal.jsx";
+import { Brand, Toast, KeyModal, Confetti } from "./components/ui.jsx";
+import Home from "./screens/Home.jsx";
+import WordsScreen from "./screens/WordsScreen.jsx";
+import Editor from "./screens/Editor.jsx";
+import WordPop from "./components/WordPop.jsx";
+import TopicScreen from "./screens/TopicScreen.jsx";
+import ChatPanel from "./components/ChatPanel.jsx";
+import ImageGallery from "./components/ImageGallery.jsx";
+import { useBank } from "./lib/imagebank.js";
+import MoveModal from "./components/MoveModal.jsx";
+import { removeWord, vocabKey } from "./lib/vocab.js";
+import { applyOps, assignedSet, dropItem, moveItem, navFor, organize, renameTopic, dropTopic } from "./lib/topics.js";
+import { store, prefs } from "./lib/storage.js";
+import { ENV_KEY, warmUp, warmConnection } from "./lib/gemini.js";
+import { resizeDataUrl } from "./lib/image.js";
+import { wordLines, parseWord, studyStats } from "./lib/parse.js";
+import { saveCheer } from "./lib/motivation.js";
+import { learn } from "./lib/progress.js";
+import { setSpeechKey, stopSpeaking } from "./lib/speech.js";
+import { setTranslateKey } from "./lib/wordtr.js";
+import { GOALS } from "./lib/config.js";
+import { hideSplash } from "./lib/splash.js";
+
+const AI_CTX = { kind: "global", question: "", explanation: "" };
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+/* a compact digest of the saved questions: the model links the new question to them, inside the sentence it belongs to */
+const historyFor = (questions, currentId) => (questions || [])
+  .filter((q) => q && q.id !== currentId && q.title)
+  .slice(0, 120)
+  .map((q) => ({
+    title: String(q.title).replace(/[«»=*\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 70),
+    terms: wordLines(q.new_words || "").slice(0, 8).map((l) => parseWord(l).term.replace(/[*=«»]/g, "").trim()).filter(Boolean),
+  }))
+  .filter((h) => h.title);
+const lessonTitle = (text) => {
+  const line = String(text || "").split("\n").map((l) => l.replace(/^[#>\-*\s]+/, "").replace(/\*\*/g, "").trim())
+    .find((l) => l && !/^(📖|🗂|⏱|المادة بتتكلم|أهم الأجزاء|نوع المادة|What is this|Main parts|Type of)/u.test(l));
+  return line ? (line.length > 60 ? line.slice(0, 58) + "…" : line) : "شرح جديد";
+};
+const titleFrom = (text) => {
+  const first = (text || "").split("\n").map((l) => l.trim()).find(Boolean) || "";
+  if (!first) return "سؤال بدون عنوان";
+  return first.length > 56 ? first.slice(0, 54).trimEnd() + "…" : first;
+};
+
+/* Signature. Fixed in the bottom-left corner, never takes a click, never moves or resizes anything (pointer-events:none, out of the layout flow). */
+function Credit() {
+  return (
+    <div className="credit" role="note" aria-label="BY / MOSTAFA HAMMAD WITH AI" dir="ltr">
+      <span className="credit-dim">BY /</span>
+      <b>MOSTAFA HAMMAD</b>
+      <span className="credit-dim">WITH AI</span>
+    </div>
+  );
+}
+
+export default function App({ boot }) {
+  const [questions, setQuestions] = useState(boot.questions);
+  const [words, setWords] = useState(boot.words);
+  const [view, setView] = useState({ name: "home" });
+  const [toast, setToast] = useState("");
+  const [apiKey, setApiKey] = useState(boot.apiKey || ENV_KEY);
+  const [goal, setGoal] = useState(boot.goal);
+  const [perf, setPerf] = useState(boot.perf);
+  const [topics, setTopics] = useState(boot.topics);
+  const [org, setOrg] = useState({ busy: false, done: 0, total: 0, err: "" });
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiEver, setAiEver] = useState(false);
+  const [aiCmd, setAiCmd] = useState(null);
+  const [moveFor, setMoveFor] = useState(null);
+  const [showKey, setShowKey] = useState(false);
+  const [burst, setBurst] = useState(0);
+  const burstTimer = useRef(null);
+  const [theme, setTheme] = useState(() => document.documentElement.dataset.theme || "light");
+  const toastTimer = useRef(null);
+  const perfRef = useRef(perf);
+  perfRef.current = perf;
+  /* always-current copies of the lists: auto-save can fire twice before React re-renders, and must never see a stale list */
+  const qRef = useRef(questions);
+  const wRef = useRef(words);
+  qRef.current = questions;
+  wRef.current = words;
+  const tRef = useRef(topics);
+  tRef.current = topics;
+  const [showBackup, setShowBackup] = useState(false);
+  const galleryCount = useBank().length;
+  const keyRef = useRef(apiKey);
+  keyRef.current = apiKey;
+  const orgCtl = useRef(null);
+  const tried = useRef(new Set());     // items the AI already looked at this session (so it never loops)
+  const failUntil = useRef(0);
+
+  /* every topic change goes through here: applied to the newest state, then saved */
+  const commitTopics = (fn) => {
+    const next = fn(tRef.current);
+    tRef.current = next;
+    setTopics(next);
+    store.set("nclex:topics", next);
+    return next;
+  };
+  const validIds = () => new Set(qRef.current.map((q) => q.id));
+
+  /* the AI puts every question / lesson that has no topic yet into one (existing or new) */
+  const runOrganize = async (full = false, manual = false) => {
+    if (orgCtl.current) return;
+    if (!keyRef.current) { if (manual) setShowKey(true); return; }
+    let st = tRef.current;
+    if (full) st = commitTopics((cur) => applyOps(cur, [{ type: "reset" }], validIds()));
+    const done = assignedSet(st), pin = new Set(st.pinned);
+    const todo = qRef.current.filter((q) => !done.has(q.id) && !pin.has(q.id) && (manual || !tried.current.has(q.id)));
+    if (!todo.length) { if (manual) say("كل أسئلتك متنظّمة ✅"); return; }
+    const ctrl = new AbortController();
+    orgCtl.current = ctrl;
+    setOrg({ busy: true, done: 0, total: todo.length, err: "" });
+    try {
+      await organize({
+        apiKey: keyRef.current, todo, state: st, signal: ctrl.signal,
+        apply: (ops) => commitTopics((cur) => applyOps(cur, ops, validIds())),
+        onProgress: (d, t) => setOrg((o) => ({ ...o, done: d, total: t })),
+      });
+      todo.forEach((q) => tried.current.add(q.id));
+      if (manual) say("اتنظّمت الأسئلة في مواضيع ✅");
+      setOrg({ busy: false, done: 0, total: 0, err: "" });
+    } catch (e) {
+      if (e && e.name === "AbortError") setOrg({ busy: false, done: 0, total: 0, err: "" });
+      else { failUntil.current = Date.now() + 120000; setOrg({ busy: false, done: 0, total: 0, err: (e && e.message) || "التنظيم فشل. جرّب تاني." }); }
+    } finally { orgCtl.current = null; }
+  };
+  const runRef = useRef(runOrganize);
+  runRef.current = runOrganize;
+
+  /* automatic: a few seconds after the last change, anything without a topic is organised in ONE request */
+  useEffect(() => {
+    if (!apiKey || !topics.auto || view.name === "edit") return undefined;   // never while a question is open: items pile up and go in ONE request
+    const done = assignedSet(topics), pin = new Set(topics.pinned);
+    if (!questions.some((q) => !done.has(q.id) && !pin.has(q.id) && !tried.current.has(q.id))) return undefined;
+    const t = setTimeout(() => runRef.current(false, false), Math.max(15000, failUntil.current - Date.now()));
+    return () => clearTimeout(t);
+  }, [questions, topics, apiKey, view.name]);
+
+  /* the launch splash (native icon screen + the cover in index.html) is handed over to the app after the first real paint */
+  useEffect(() => { hideSplash(); }, []);
+
+  /* warm the network while the user is still choosing a picture */
+  useEffect(() => { syncUsageKey(apiKey); warmUp(apiKey); warmConnection(apiKey); }, [apiKey]);
+
+  /* history-aware navigation so the Android back button works */
+  useEffect(() => {
+    window.history.replaceState({ v: { name: "home" } }, "");
+    const onPop = (e) => setView((e.state && e.state.v) || { name: "home" });
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const toggleTheme = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    document.documentElement.dataset.theme = next;
+    prefs.set("nclex:theme", next);
+    const m = document.querySelector('meta[name="theme-color"]');
+    if (m) m.setAttribute("content", next === "dark" ? "#0A1120" : "#F3F7FB");
+  };
+
+  const say = (msg, ms = 2800) => {
+    setToast(msg);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), ms);
+  };
+
+  const celebrate = () => {
+    setBurst(Date.now());
+    clearTimeout(burstTimer.current);
+    burstTimer.current = setTimeout(() => setBurst(0), 2600);
+  };
+
+  /* pronunciation: key for Gemini voice, error toast, and silence when the screen changes */
+  const sayRef = useRef(say);
+  sayRef.current = say;
+  useEffect(() => { setSpeechKey(apiKey); setTranslateKey(apiKey); }, [apiKey]);
+  useEffect(() => {
+    const h = (e) => sayRef.current(e.detail);
+    window.addEventListener("nclex:speech-error", h);
+    return () => window.removeEventListener("nclex:speech-error", h);
+  }, []);
+  useEffect(() => { stopSpeaking(); }, [view]);
+
+  const go = (v, replace = false) => {
+    if (replace) window.history.replaceState({ v }, "");
+    else window.history.pushState({ v }, "");
+    setView(v);
+    window.scrollTo({ top: 0 });
+  };
+  const back = () => window.history.back();
+
+  const saveKey = async (k) => {
+    const key = (k || "").trim();
+    syncUsageKey(key || ENV_KEY);                       // a new key starts a fresh usage counter
+    setApiKey(key || ENV_KEY);
+    await store.set("nclex:apikey", key);
+    setShowKey(false);
+    say(key ? "اتحفظ المفتاح 🔑" : "اتمسح المفتاح");
+  };
+
+  const cycleGoal = async () => {
+    const next = GOALS[(Math.max(0, GOALS.indexOf(goal)) + 1) % GOALS.length];
+    setGoal(next);
+    await store.set("nclex:goal", next);
+  };
+
+  const onLearn = useCallback((task, modeId, ms, chars) => {
+    const next = learn(perfRef.current, task, modeId, ms, chars);
+    perfRef.current = next;
+    setPerf(next);
+    store.set("nclex:perf", next);
+  }, []);
+
+  /* Auto-save, called by the editor (it never navigates away).
+     `id` is empty only for the very first save of a new question; after that the editor keeps sending the same id,
+     so every later save updates that one question instead of creating a copy. */
+  const saveQuestion = async ({ id: knownId, kind, title, imageUrl, doc, imageChanged, instructions, chips, result, silent }) => {
+    const id = knownId || uid();
+    const existing = qRef.current.find((q) => q.id === id) || null;
+    const now = Date.now();
+    let thumb = existing?.thumb || null;
+    if (!existing || imageChanged) {
+      if (imageUrl) {
+        try { thumb = await resizeDataUrl(imageUrl, 360, 0.6); } catch (e) { /* keep old thumb */ }
+        const ok = await store.set(`nclex:img:${id}`, { data: imageUrl, doc: doc || null });
+        if (!ok) say("الصورة كبيرة والتخزين ممتلئ، اتحفظ النص بس");
+      } else {
+        await store.del(`nclex:img:${id}`);
+        thumb = null;
+      }
+    }
+    const q = {
+      id, kind: kind || "question", title: title.trim() || (kind === "lesson" ? lessonTitle(result.original_question_text) : titleFrom(result.original_question_text)), ...result, instructions, chips,
+      thumb, createdAt: existing?.createdAt || now, updatedAt: now,
+    };
+    const prevQ = qRef.current;
+    const nextQ = existing ? prevQ.map((x) => (x.id === id ? q : x)) : [q, ...prevQ];
+
+    /* new words are NOT added to the dictionary any more: the student classifies each one (⭐ / ✓) and only those are saved (lib/vocab.js).
+       Words saved by older versions stay in `words` until classified or cleared. */
+    const lines = wordLines(result.new_words);
+    const nextW = wRef.current;
+
+    /* a new question: tell the person how far they are (goal / streak / level) and celebrate the big moments */
+    const statsOf = (qs) => ({ ...studyStats(qs, goal), total: qs.length });
+    const cheer = existing || silent ? { confetti: false, msg: "" } : saveCheer(statsOf(prevQ), statsOf(nextQ), goal);
+
+    qRef.current = nextQ; wRef.current = nextW;
+    setQuestions(nextQ); setWords(nextW);
+    await Promise.all([store.set("nclex:questions", nextQ), store.set("nclex:words", nextW)]);
+    if (!existing && !silent) {   // only the first save speaks; later silent updates (edits) don't pop a message each time
+      const base = lines.length ? `اتحفظ تلقائي ✅ عندك ${lines.length} كلمة جديدة، صنّف المهم منها ⭐` : "اتحفظ السؤال تلقائي ✅";
+      if (cheer.confetti) celebrate();
+      say(cheer.msg ? `اتحفظ ✅ ${cheer.msg}` : base, cheer.confetti ? 4200 : 3200);
+    }
+    return id;
+  };
+
+  const deleteQuestion = async (id) => {
+    const nextQ = qRef.current.filter((q) => q.id !== id);
+    const nextW = wRef.current.filter((w) => w.qid !== id);
+    qRef.current = nextQ; wRef.current = nextW;
+    setQuestions(nextQ); setWords(nextW);
+    commitTopics((cur) => dropItem(cur, id));
+    await Promise.all([store.set("nclex:questions", nextQ), store.set("nclex:words", nextW), store.del(`nclex:img:${id}`), store.del(`nclex:chat:${id}`)]);
+    say("اتحذف السؤال");
+    back();
+  };
+
+  /* delete a word from the dictionary: its classification AND any copy still waiting in the old unclassified list */
+  const deleteWord = async (term) => {
+    removeWord(term);
+    const k = vocabKey(term);
+    const nextW = wRef.current
+      .map((w) => ({ ...w, text: wordLines(w.text).filter((l) => vocabKey(parseWord(l).term) !== k).join("\n") }))
+      .filter((w) => w.text.trim());
+    wRef.current = nextW; setWords(nextW);
+    await store.set("nclex:words", nextW);
+    say("اتحذفت الكلمة");
+  };
+
+  const clearLegacyWords = async () => {
+    wRef.current = []; setWords([]);
+    await store.set("nclex:words", []);
+    say("اتمسحت الكلمات القديمة");
+  };
+
+  const openItem = (id, replace) => go({ name: "edit", id }, !!replace);
+  const openAI = (cmd) => {
+    setAiEver(true); setAiOpen(true);
+    if (cmd) setAiCmd({ ...cmd, id: Date.now() });
+  };
+  const moveTo = (qid, target) => { commitTopics((cur) => moveItem(cur, qid, target)); setMoveFor(null); say(target ? "اتنقل للموضوع ✅" : "اتشال من الموضوع"); };
+  const topicView = view.name === "topic" ? topics.list.find((t) => t.id === view.id) : null;
+  const libraryObj = { questions, topics };
+  const moveQ = moveFor ? questions.find((q) => q.id === moveFor) : null;
+
+  const editing = view.name === "edit" && view.id ? questions.find((q) => q.id === view.id) : null;
+
+  return (
+    <div className="app" dir="rtl" data-sub={view.name !== "home"}>
+      <div className="paper" aria-hidden="true" />
+
+      <header className="topbar">
+        <div className="topbar-in">
+          <div className="tb-side tb-start">
+            {view.name !== "home" && (
+              <button onClick={back} aria-label="رجوع" className="iconbtn iconbtn-solid"><Icon name="back" size={20} /></button>
+            )}
+            <Brand onClick={() => go({ name: "home" }, true)} />
+          </div>
+          <div className="tb-side tb-end">
+            <button type="button" onClick={() => (aiOpen ? setAiOpen(false) : openAI())} aria-label="AI — مساعد المذاكرة" aria-pressed={aiOpen} className="ai-btn" data-on={aiOpen}>
+              <Icon name="sparkles" size={17} /><span>AI</span>
+            </button>
+            <button onClick={() => (view.name === "gallery" ? back() : go({ name: "gallery" }))} aria-label="معرض الصور" title="معرض الصور" className="iconbtn iconbtn-badge" data-on={view.name === "gallery"}>
+              <Icon name="images" size={19} />{galleryCount > 0 && <i>{galleryCount > 99 ? "99+" : galleryCount}</i>}
+            </button>
+            <button onClick={toggleTheme} aria-label={theme === "dark" ? "الوضع النهاري" : "الوضع الليلي"} className="iconbtn">
+              <Icon name={theme === "dark" ? "sun" : "moon"} size={19} />
+            </button>
+            <button onClick={() => setShowBackup(true)} aria-label="نسخة احتياطية" className="iconbtn"><Icon name="save" size={19} /></button>
+            <button onClick={() => setShowKey(true)} aria-label="مفتاح Gemini" data-missing={!apiKey} className="iconbtn">
+              <Icon name="key" size={19} />
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main>
+        {view.name === "home" ? (
+          <Home questions={questions} words={words} goal={goal} onGoal={cycleGoal}
+            onAdd={() => go({ name: "edit", kind: "question" })} onAddLesson={() => go({ name: "edit", kind: "lesson" })} onWords={() => go({ name: "words" })}
+            onOpen={(id) => go({ name: "edit", id })}
+            topics={topics} org={org} onOrganize={(full) => runOrganize(full, true)} onAuto={(v) => commitTopics((c) => ({ ...c, auto: v }))}
+            onOpenTopic={(id) => go({ name: "topic", id })} />
+        ) : view.name === "topic" ? (
+          topicView ? (
+            <TopicScreen key={topicView.id} topic={topicView} questions={questions} apiKey={apiKey} onNeedKey={() => setShowKey(true)}
+              onOpen={(id) => go({ name: "edit", id })} onMove={setMoveFor} onAI={openAI}
+              onRename={(name) => commitTopics((c) => renameTopic(c, topicView.id, { name }))}
+              onDelete={() => { commitTopics((c) => dropTopic(c, topicView.id)); say("اتفكّ الموضوع، والأسئلة رجعت من غير موضوع"); back(); }}
+              onSaveOverview={(text, sig) => commitTopics((c) => renameTopic(c, topicView.id, { overview: text, overviewSig: sig }))} />
+          ) : <div className="page"><div className="card empty"><b>الموضوع ده مش موجود</b><button className="btn btn-teal" onClick={() => go({ name: "home" }, true)}>الرئيسية</button></div></div>
+        ) : view.name === "gallery" ? (
+          <ImageGallery questions={questions} topics={topics} onOpen={(id) => go({ name: "edit", id })} />
+        ) : view.name === "words" ? (
+          <WordsScreen words={words} onOpen={(id) => go({ name: "edit", id })} onClearLegacy={clearLegacyWords} onDeleteWord={deleteWord} />
+        ) : (
+          <Editor key={`${view.id || "new"}-${view.kind || ""}`} initial={editing} kind={view.kind} history={historyFor(questions, view.id)} boot={boot} apiKey={apiKey} perf={perf} onLearn={onLearn}
+            onNeedKey={() => setShowKey(true)} onSave={saveQuestion} onDelete={deleteQuestion}
+            nav={view.id ? navFor(topics, questions, view.id) : null} onNavTo={(id) => go({ name: "edit", id }, true)}
+            onOpenTopic={(id) => go({ name: "topic", id })} onMove={setMoveFor} library={libraryObj} onOpenItem={openItem} />
+        )}
+      </main>
+
+      {aiEver && (
+        <ChatPanel variant="window" open={aiOpen} onClose={() => setAiOpen(false)} apiKey={apiKey} onNeedKey={() => setShowKey(true)}
+          ctx={AI_CTX} chipIds={[]} storeKey="nclex:chat:global" command={aiCmd} onOpenItem={openItem}
+          library={{ questions, topics, focusId: view.name === "edit" ? view.id : null, focusTopicId: view.name === "topic" ? view.id : null }} />
+      )}
+      {moveQ && <MoveModal title={moveQ.title} topics={topics} currentId={(topics.list.find((t) => t.qids.includes(moveQ.id)) || {}).id} onPick={(t) => moveTo(moveQ.id, t)} onClose={() => setMoveFor(null)} />}
+      <WordPop />
+      {showBackup && <BackupModal onClose={() => setShowBackup(false)} />}
+      {showKey && <KeyModal current={apiKey === ENV_KEY ? "" : apiKey} hasEnv={!!ENV_KEY} onSave={saveKey} onClose={() => setShowKey(false)} />}
+      <Toast msg={toast} />
+      <Credit />
+      {burst > 0 && <Confetti key={burst} />}
+    </div>
+  );
+}
