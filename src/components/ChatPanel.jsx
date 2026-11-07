@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import Icon from "./Icon.jsx";
 import { RichText } from "./rich.jsx";
 import ExamCard from "./ExamCard.jsx";
+import FontSizer, { ScaledBox } from "./FontSizer.jsx";
 import { Lightbox, StrokeLayer, inkKey, loadInk, inkOnBlob } from "./ImageInk.jsx";
 import { askChat } from "../lib/chat.js";
 import { makeExam, wantsExam } from "../lib/exam.js";
@@ -11,6 +12,8 @@ import { makePicture, restyle, WANTS_AR, WANTS_REDO, WANTS_RESTYLE, ENGINES, get
 import { readFiles, sourceParts, MAX_ITEMS } from "../lib/docs.js";
 import { fixText } from "../lib/text.js";
 import { store, prefs } from "../lib/storage.js";
+import { loadIndex, loadConv, saveConv, removeConv, newConvId, convTitle } from "../lib/chathist.js";
+import { stampShort } from "../lib/time.js";
 import { saveImageFile } from "../lib/imgfile.js";
 import { useBank, imgId, saveImage, removeImage, GLOBAL_LESSON } from "../lib/imagebank.js";
 
@@ -55,7 +58,7 @@ function forStorage(messages) {
     const m = messages[i];
     if (m.img && m.img.data.length <= budget) { keep.add(m.id); budget -= m.img.data.length; }
   }
-  return messages.slice(-60).map(({ id, role, text, atts, img, via, exam, refs, isExam, gen }) => ({ id, role, text, via, exam, refs, isExam, gen, atts: (atts || []).map(({ name, label, t }) => ({ name, label, t })), img: img && keep.has(id) ? img : undefined }));
+  return messages.filter((m) => m.role !== "ai" || m.text || m.img || m.exam || m.err).slice(-60).map(({ id, role, text, atts, img, via, exam, refs, isExam, gen }) => ({ id, role, text, via, exam, refs, isExam, gen, atts: (atts || []).map(({ name, label, t }) => ({ name, label, t })), img: img && keep.has(id) ? img : undefined }));
 }
 
 function GenImage({ img, via, busy, onRestyle, onTranslate, bank }) {
@@ -175,19 +178,49 @@ export default function ChatPanel({
   const lessonId = storeKey && storeKey !== "nclex:chat:global" ? storeKey.replace(/^nclex:chat:/, "") : GLOBAL_LESSON;
   const lessonTitle = lessonId === GLOBAL_LESSON ? "" : ((((library && library.questions) || []).find((x) => x.id === lessonId) || {}).title || "");
 
-  /* load / save the conversation (per saved question, or the one global conversation) */
+  /* ── conversations (v3.25) ──
+     Every chat keeps a LIST of conversations (lib/chathist.js): the newest opens first, the history panel switches between them,
+     starts a new one or deletes one. A conversation is created when its first message is sent, so there are never empty ones. */
+  const [convs, setConvs] = useState([]);
+  const [convId, setConvId] = useState(null);
+  const [histOpen, setHistOpen] = useState(false);
+  const [delId, setDelId] = useState(null);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const convIdRef = useRef(convId);
+  convIdRef.current = convId;
+  const loadedRef = useRef(null);          // the array that was just loaded from storage (not saved again until it changes)
+  const chainRef = useRef(Promise.resolve());
+  /* every write goes through one queue: a save can never land after the delete of the same conversation */
+  const queue = (fn) => { const run = chainRef.current.then(fn, fn).catch(() => null); chainRef.current = run; return run; };
+
   useEffect(() => {
     if (!storeKey) return undefined;
     let alive = true;
-    store.get(storeKey).then((r) => { if (alive && Array.isArray(r) && r.length) setMessages((cur) => (cur.length ? cur : r)); });
+    (async () => {
+      const idx = await loadIndex(storeKey);
+      if (!alive) return;
+      setConvs(idx);
+      if (idx.length && !messagesRef.current.length) {
+        const msgs = await loadConv(storeKey, idx[0].id);
+        if (alive && !messagesRef.current.length) { loadedRef.current = msgs; setConvId(idx[0].id); setMessages(msgs); }
+      }
+    })();
     return () => { alive = false; };
   }, [storeKey]);
 
+  useEffect(() => { if (storeKey && messages.length && !convId) setConvId(newConvId()); }, [messages.length, convId, storeKey]);
+
   useEffect(() => {
-    if (!storeKey || busy || !messages.length) return undefined;
-    const t = setTimeout(() => store.set(storeKey, forStorage(messages)), 400);
+    if (!storeKey || busy || !messages.length || !convId || messages === loadedRef.current) return undefined;
+    const t = setTimeout(() => {
+      const clean = forStorage(messages);
+      if (clean.length) queue(() => saveConv(storeKey, convId, clean)).then((idx) => { if (idx) setConvs(idx); });
+    }, 400);
     return () => clearTimeout(t);
-  }, [messages, busy, storeKey]);
+  }, [messages, busy, storeKey, convId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => { if (!open) { setHistOpen(false); setDelId(null); } }, [open]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -300,8 +333,8 @@ export default function ChatPanel({
       } else {
         let codes = {};
         const show = (raw2) => {
-          const { text, cites } = splitCites(raw2);
-          const refs = cites.map((c) => codes[c]).filter(Boolean);
+          const { text, cites, claims } = splitCites(raw2);
+          const refs = cites.map((c) => (codes[c] ? { ...codes[c], code: c, claim: claims[c] || "" } : null)).filter(Boolean);
           patch(ai.id, (m) => ({ ...m, text: fixText(text), refs }));
         };
         const out = await askChat({
@@ -330,11 +363,55 @@ export default function ChatPanel({
     if (user && user.role === "user") send(user.text, { base: messages.slice(0, i - 1), atts: [], image: messages[i].gen, exam: messages[i].isExam });
   };
 
+  const resetComposer = () => {
+    setInput(""); setFiles([]); setNote(""); setImgMode(false); setExamMode(false); setWait("");
+    if (inputRef.current) inputRef.current.style.height = "auto";
+    stick.current = true;
+  };
+  /* write the conversation that is on screen (also while it is still being answered: only what exists is kept) */
+  const flush = () => {
+    const id = convIdRef.current, ms = messagesRef.current;
+    if (!storeKey || !id || !ms.length || ms === loadedRef.current) return Promise.resolve();
+    const clean = forStorage(ms);
+    if (!clean.length) return Promise.resolve();
+    return queue(() => saveConv(storeKey, id, clean)).then((idx) => { if (idx) setConvs(idx); });
+  };
+  const leave = async () => { abortRef.current?.abort(); await flush(); };
+  const newChat = async () => {
+    setHistOpen(false);
+    if (!messagesRef.current.length) { setTimeout(() => inputRef.current?.focus(), 60); return; }
+    await leave();
+    loadedRef.current = null; setMessages([]); setConvId(null); resetComposer();
+    setTimeout(() => inputRef.current?.focus(), 60);
+  };
+  const openConv = async (id) => {
+    setHistOpen(false);
+    if (id === convIdRef.current) return;
+    await leave();
+    const msgs = await loadConv(storeKey, id);
+    loadedRef.current = msgs; setConvId(id); setMessages(msgs); resetComposer();
+  };
+  const deleteConv = async (id) => {
+    setDelId(null);
+    if (id === convIdRef.current) { abortRef.current?.abort(); loadedRef.current = null; setMessages([]); setConvId(null); resetComposer(); }
+    const idx = await queue(() => removeConv(storeKey, id));
+    if (idx) setConvs(idx);
+  };
+  const askDel = (id) => {
+    if (delId !== id) { setDelId(id); setTimeout(() => setDelId((cur) => (cur === id ? null : cur)), 2500); return; }
+    deleteConv(id);
+  };
+  const toggleHist = async () => {
+    if (histOpen) { setHistOpen(false); return; }
+    await flush();
+    setHistOpen(true);
+  };
+  /* the trash in the header deletes the conversation on screen (after a second tap) */
   const clear = () => {
     if (!sure) { setSure(true); setTimeout(() => setSure(false), 2500); return; }
-    abortRef.current?.abort();
-    setMessages([]); setSure(false);
-    if (storeKey) store.del(storeKey);
+    setSure(false);
+    const id = convIdRef.current;
+    if (id) deleteConv(id); else { abortRef.current?.abort(); setMessages([]); resetComposer(); }
   };
 
   const onKey = (e) => {
@@ -358,6 +435,7 @@ export default function ChatPanel({
   useEffect(() => {
     if (!command || !open || handled.current === command.id) return;
     handled.current = command.id;
+    setHistOpen(false);
     if (command.send) sendRef.current(command.text, command.exam ? { exam: true } : {});
     else { setInput(command.text || ""); setExamMode(!!command.exam); setTimeout(() => inputRef.current?.focus(), 60); }
   }, [command, open]);
@@ -376,10 +454,10 @@ export default function ChatPanel({
   });
 
   /* a source chip: open that saved question. Closing first when the chat is modal (drawer / phone sheet) and reusing its history entry. */
-  const openItem = (id) => {
+  const openItem = (id, claim) => {
     const modal = pushed.current;
     if (modal) { pushed.current = false; onClose(); }
-    if (onOpenItem) onOpenItem(id, modal);
+    if (onOpenItem) onOpenItem(id, modal, claim ? { text: claim, nonce: Date.now() } : null);
   };
 
   /* ── window size ── */
@@ -430,7 +508,7 @@ export default function ChatPanel({
   const sub = subtitle || (ctx.kind === "global" ? "اشرح، امتحنّي، لخّص، ارسم — وبيشوف كل أسئلتك" : "اسأل، اعترض، ارفع ملفات، أو اطلب رسم");
 
   return (
-    <aside className={`chat${win ? " chat-win" : ""}`} hidden={!open} aria-label={head} data-over={over} data-full={sizeKey} style={winStyle}
+    <aside className={`chat${win ? " chat-win" : ""}`} hidden={!open} aria-label={head} data-over={over} data-hist={histOpen} data-full={sizeKey} style={winStyle}
       onKeyDown={win ? (e) => { if (e.key === "Escape") onClose(); } : undefined}
       onDragOver={(e) => { if (e.dataTransfer?.types?.includes("Files")) { e.preventDefault(); setOver(true); } }}
       onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setOver(false); }}
@@ -463,12 +541,43 @@ export default function ChatPanel({
           </button>
         )}
         {messages.length > 0 && (
-          <button type="button" className="iconbtn chat-clear" data-sure={sure} onClick={clear} aria-label="مسح المحادثة" title="مسح المحادثة">
+          <button type="button" className="iconbtn chat-clear" data-sure={sure} onClick={clear} aria-label="احذف المحادثة دي" title="احذف المحادثة دي">
             {sure ? <span className="chat-sure">تأكيد؟</span> : <Icon name="trash" size={17} />}
           </button>
         )}
         <button type="button" className="iconbtn" onClick={onClose} aria-label="إغلاق"><Icon name="x" size={18} /></button>
       </header>
+
+      {storeKey && (
+        <div className="chat-bar">
+          <button type="button" className="chat-bar-btn" data-on={histOpen} aria-pressed={histOpen} onClick={toggleHist} title="سجل المحادثات">
+            <Icon name="clock" size={16} /> السجل{convs.length > 0 && <small>{convs.length}</small>}
+          </button>
+          <span className="chat-bar-title" dir="auto">{histOpen ? "سجل المحادثات" : ((convs.find((c) => c.id === convId) || {}).title || (messages.length ? convTitle(messages) : "محادثة جديدة"))}</span>
+          <button type="button" className="chat-bar-btn chat-bar-new" onClick={newChat} title="ابدأ محادثة جديدة (القديمة بتفضل في السجل)">
+            <Icon name="plus" size={16} stroke={3} /> جديدة
+          </button>
+        </div>
+      )}
+
+      {histOpen && (
+        <div className="chat-hist" role="list" aria-label="سجل المحادثات">
+          <button type="button" className="btn btn-teal btn-sm chat-hist-new" onClick={newChat}><Icon name="plus" size={16} stroke={3} /> محادثة جديدة</button>
+          {convs.length === 0 && <p className="chat-hist-empty">لسه مفيش محادثات محفوظة. أول رسالة تبعتها هتتسجّل هنا.</p>}
+          {convs.map((c) => (
+            <div key={c.id} className="chat-hist-row" role="listitem" data-on={c.id === convId}>
+              <button type="button" className="chat-hist-open" onClick={() => openConv(c.id)}>
+                <b dir="auto">{c.title}</b>
+                <small>{stampShort(c.updatedAt)} · {c.n} {c.n > 10 ? "رسالة" : "رسائل"}</small>
+              </button>
+              <button type="button" className="iconbtn chat-hist-del" data-sure={delId === c.id} onClick={() => askDel(c.id)}
+                aria-label={delId === c.id ? "تأكيد حذف المحادثة" : `احذف المحادثة: ${c.title}`} title="احذف المحادثة دي">
+                {delId === c.id ? <span className="chat-sure">تأكيد؟</span> : <Icon name="trash" size={16} />}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="chat-list" ref={listRef} onScroll={onScroll}>
         {messages.length === 0 && (
@@ -484,7 +593,7 @@ export default function ChatPanel({
           </div>
         )}
         {messages.map((m, mi) => (
-          <div key={m.id} className={`chat-msg ${m.role === "user" ? "me" : "bot"}`}>
+          <ScaledBox key={m.id} id={m.role === "user" ? `chat:me:${m.id}` : `chat:${m.id}`} className={`chat-msg ${m.role === "user" ? "me" : "bot"}`}>
             {m.role === "user" ? (
               <>
                 {m.atts && m.atts.length > 0 && (
@@ -495,6 +604,7 @@ export default function ChatPanel({
             ) : (
               <>
                 {m.img && <GenImage img={m.img} via={m.via} busy={busy} bank={{ lessonId, lessonTitle, caption: (m.img.spec && (m.img.spec.ar || m.img.spec.title)) || (messages[mi - 1] && messages[mi - 1].role === "user" ? messages[mi - 1].text : "") }} onRestyle={() => restyleMsg(m.id)} onTranslate={() => send("أعد إنشاء الصورة وحط تحت كل سطر إنجليزي الترجمة العربي", { image: true })} />}
+                {(m.text || m.exam) && <div className="chat-fs"><FontSizer id={`chat:${m.id}`} label="حجم خط الرد" /></div>}
                 {m.text && <Rich text={m.text} />}
                 {m.exam && <ExamCard exam={m.exam} busy={busy} onChange={(ex) => setExam(m.id, ex)} onAsk={(t, o) => send(t, o)} />}
                 {!m.text && !m.exam && !m.err && !m.stopped && !m.img && (
@@ -502,9 +612,11 @@ export default function ChatPanel({
                 )}
                 {m.refs && m.refs.length > 0 && (
                   <div className="chat-refs">
-                    <span><Icon name="link" size={13} /> من أسئلتك:</span>
+                    <span><Icon name="link" size={13} /> المصادر (دوس تفتح وتتظلّل):</span>
                     {m.refs.map((r) => (
-                      <button key={r.id} type="button" onClick={() => openItem(r.id)} title="افتح السؤال" dir="auto">{r.title}</button>
+                      <button key={r.id} type="button" onClick={() => openItem(r.id, r.claim)} title="افتح وظلّل الجزء اللي الرد جاي منه" dir="auto">
+                        <Icon name={r.kind === "lesson" ? "bookOpen" : "fileText"} size={12} /> {r.title}
+                      </button>
                     ))}
                   </div>
                 )}
@@ -517,7 +629,7 @@ export default function ChatPanel({
                 <button type="button" className="btn btn-ghost btn-sm" onClick={() => retry(m.id)} disabled={busy}><Icon name="refresh" size={15} /> حاول تاني</button>
               </div>
             )}
-          </div>
+          </ScaledBox>
         ))}
       </div>
 

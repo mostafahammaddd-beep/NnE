@@ -3,7 +3,7 @@ import Icon from "../components/Icon.jsx";
 import { wordLines, studyStats } from "../lib/parse.js";
 import { levelInfo, weekDays, heroMessage, pickWord } from "../lib/motivation.js";
 import { WordCard } from "../components/rich.jsx";
-import { assignedSet, topicOf } from "../lib/topics.js";
+import { assignedSet, topicOf, kindOf } from "../lib/topics.js";
 import { prefs } from "../lib/storage.js";
 import { stampShort } from "../lib/time.js";
 import { useVocab, savedCount } from "../lib/vocab.js";
@@ -62,20 +62,27 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesso
   /* ── topics: the AI keeps related questions / lessons / files together ── */
   const assigned = useMemo(() => assignedSet(topics), [topics]);
   const pinned = useMemo(() => new Set(topics.pinned), [topics.pinned]);
-  const loose = useMemo(() => sorted.filter((q) => !assigned.has(q.id)), [sorted, assigned]);
+  /* v3.25: two sections, each with its own topics: الأسئلة (exam questions) and الشروحات (lessons / study material) */
+  const [kindTab, setKindTab] = useState(() => (prefs.get("nclex:home:kind", "") === "lesson" ? "lesson" : "question"));
+  const pickKind = (k) => { setKindTab(k); prefs.set("nclex:home:kind", k); };
+  const nQ = useMemo(() => questions.filter((q) => kindOf(q) === "question").length, [questions]);
+  const nL = questions.length - nQ;
+  const kindItems = useMemo(() => sorted.filter((q) => kindOf(q) === kindTab), [sorted, kindTab]);
+  const isLessons = kindTab === "lesson";
+  const loose = useMemo(() => kindItems.filter((q) => !assigned.has(q.id)), [kindItems, assigned]);
   const waiting = useMemo(() => loose.filter((q) => !pinned.has(q.id)), [loose, pinned]);
-  const topicList = useMemo(() => [...topics.list].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)), [topics.list]);
+  const topicList = useMemo(() => topics.list.filter((t) => t.kind === kindTab).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)), [topics.list, kindTab]);
   const byId = useMemo(() => new Map(questions.map((q) => [q.id, q])), [questions]);
   const [view, setView] = useState(() => prefs.get("nclex:home:view", "") || "");
-  const mode = view === "all" || view === "topics" ? view : (topics.list.length ? "topics" : "all");
+  const mode = view === "all" || view === "topics" ? view : (topicList.length ? "topics" : "all");
   const pickView = (v) => { setView(v); prefs.set("nclex:home:view", v); };
   const [armed, setArmed] = useState(false);
   useEffect(() => { if (!armed) return undefined; const t = setTimeout(() => setArmed(false), 3000); return () => clearTimeout(t); }, [armed]);
   const organizeClick = () => {
     if (org.busy) return;
-    if (waiting.length) { onOrganize(false); return; }
+    if (waiting.length) { onOrganize(false, kindTab); return; }
     if (!armed) { setArmed(true); return; }
-    setArmed(false); onOrganize(true);
+    setArmed(false); onOrganize(true, kindTab);
   };
 
   /* the ring fills up when the screen opens (a small reward for looking at your progress) */
@@ -173,11 +180,20 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesso
       <div className="home-main">
       <h2 className="h-sec">أسئلتك وشروحاتك المحفوظة <span>{sorted.length}</span></h2>
 
-      {sorted.length > 0 && (
+      <div className="kindtabs" role="tablist" aria-label="القسم">
+        <button type="button" role="tab" aria-selected={!isLessons} data-on={!isLessons} data-k="question" onClick={() => pickKind("question")}>
+          <Icon name="fileText" size={19} /> <b>الأسئلة</b> <small>{nQ}</small>
+        </button>
+        <button type="button" role="tab" aria-selected={isLessons} data-on={isLessons} data-k="lesson" onClick={() => pickKind("lesson")}>
+          <Icon name="bookOpen" size={19} /> <b>الشروحات</b> <small>{nL}</small>
+        </button>
+      </div>
+
+      {kindItems.length > 0 && (
         <div className="tabsbar">
           <div className="seg tabs" role="tablist" aria-label="طريقة العرض">
-            <button type="button" role="tab" aria-selected={mode === "topics"} data-on={mode === "topics"} onClick={() => pickView("topics")}><Icon name="layers" size={16} /> حسب الموضوع {topics.list.length > 0 && <small>{topics.list.length}</small>}</button>
-            <button type="button" role="tab" aria-selected={mode === "all"} data-on={mode === "all"} onClick={() => pickView("all")}><Icon name="list" size={16} /> الكل <small>{sorted.length}</small></button>
+            <button type="button" role="tab" aria-selected={mode === "topics"} data-on={mode === "topics"} onClick={() => pickView("topics")}><Icon name="layers" size={16} /> حسب الموضوع {topicList.length > 0 && <small>{topicList.length}</small>}</button>
+            <button type="button" role="tab" aria-selected={mode === "all"} data-on={mode === "all"} onClick={() => pickView("all")}><Icon name="list" size={16} /> الكل <small>{kindItems.length}</small></button>
           </div>
           <div className="org-row">
             <button type="button" className="btn btn-ghost btn-sm org-btn" onClick={organizeClick} disabled={org.busy} data-armed={armed}>
@@ -192,28 +208,36 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesso
         </div>
       )}
 
-      {sorted.length === 0 ? (
-        <div className="card empty">
-          <span className="empty-ico"><Icon name="heartPulse" size={34} /></span>
-          <b>لسه مفيش أسئلة محفوظة</b>
-          <p>ارفع أول سؤال وشوف التفصيص بنفسك. كل سؤال بتفهمه بيقرّبك من الرخصة 💙</p>
-          <button onClick={onAdd} className="btn btn-teal" style={{ marginTop: 8 }}>أضف أول سؤال</button>
-        </div>
+      {kindItems.length === 0 ? (
+        isLessons ? (
+          <div className="card empty">
+            <span className="empty-ico"><Icon name="bookOpen" size={34} /></span>
+            <b>لسه مفيش شروحات محفوظة</b>
+            <p>ارفع كتاب أو ملفات أو صور أو الصق نص، وهيتشرح لك من الصفر ويتحفظ هنا، مرتّب في مواضيع.</p>
+            <button onClick={onAddLesson} className="btn btn-teal" style={{ marginTop: 8 }}>أضف أول شرح</button>
+          </div>
+        ) : (
+          <div className="card empty">
+            <span className="empty-ico"><Icon name="heartPulse" size={34} /></span>
+            <b>لسه مفيش أسئلة محفوظة</b>
+            <p>ارفع أول سؤال وشوف التفصيص بنفسك. كل سؤال بتفهمه بيقرّبك من الرخصة 💙</p>
+            <button onClick={onAdd} className="btn btn-teal" style={{ marginTop: 8 }}>أضف أول سؤال</button>
+          </div>
+        )
       ) : mode === "topics" ? (
         <>
           {topicList.length === 0 && (
             <div className="card empty topic-empty">
               <span className="empty-ico"><Icon name="layers" size={32} /></span>
-              <b>{org.busy ? "بنرتّب أسئلتك على حسب الموضوع…" : "لسه ما اتنظّمتش المواضيع"}</b>
-              <p>الـ AI بيجمّع الأسئلة والشروحات والملفات اللي عن نفس الموضوع في مكان واحد، علشان تتنقل بينها بسهولة.</p>
-              {!org.busy && <button onClick={() => onOrganize(false)} className="btn btn-teal" style={{ marginTop: 8 }}><Icon name="sparkles" size={18} /> نظّم أسئلتي</button>}
+              <b>{org.busy ? (isLessons ? "بنرتّب شروحاتك على حسب الموضوع…" : "بنرتّب أسئلتك على حسب الموضوع…") : "لسه ما اتنظّمتش المواضيع"}</b>
+              <p>{isLessons ? "الـ AI بيجمّع الشروحات والملفات اللي عن نفس الموضوع في مكان واحد، علشان تتنقل بينها بسهولة." : "الـ AI بيجمّع الأسئلة اللي عن نفس الموضوع في مكان واحد، علشان تتنقل بينها بسهولة."}</p>
+              {!org.busy && <button onClick={() => onOrganize(false, kindTab)} className="btn btn-teal" style={{ marginTop: 8 }}><Icon name="sparkles" size={18} /> {isLessons ? "نظّم شروحاتي" : "نظّم أسئلتي"}</button>}
             </div>
           )}
           {topicList.length > 0 && (
             <div className="tlist">
               {topicList.map((t) => {
                 const its = t.qids.map((id) => byId.get(id)).filter(Boolean);
-                const nl = its.filter((q) => q.kind === "lesson").length;
                 const thumbs = its.filter((q) => q.thumb).slice(0, 3);
                 return (
                   <button key={t.id} type="button" className="card tcard" onClick={() => onOpenTopic(t.id)}>
@@ -222,8 +246,9 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesso
                       <h3 dir="auto">{t.name}</h3>
                       {t.summary && <span className="tc-sum" dir="auto">{t.summary}</span>}
                       <span className="qfoot">
-                        <span className="pill" style={{ padding: "1px 10px" }}>{its.length - nl} أسئلة</span>
-                        {nl > 0 && <span className="pill pill-lesson" style={{ padding: "1px 10px" }}>{nl} شرح 📖</span>}
+                        {isLessons
+                          ? <span className="pill pill-lesson" style={{ padding: "1px 10px" }}>{its.length} {its.length > 10 ? "شرح" : "شروحات"} 📖</span>
+                          : <span className="pill" style={{ padding: "1px 10px" }}>{its.length} {its.length > 10 ? "سؤال" : "أسئلة"}</span>}
                         <span>{fmtDate(t.updatedAt)}</span>
                       </span>
                     </span>
@@ -243,7 +268,7 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesso
         </>
       ) : (
         <div className="qlist">
-          {sorted.map((q) => <QCard key={q.id} q={q} onOpen={onOpen} topic={topicOf(topics, q.id)} />)}
+          {kindItems.map((q) => <QCard key={q.id} q={q} onOpen={onOpen} topic={topicOf(topics, q.id)} />)}
         </div>
       )}
       </div>

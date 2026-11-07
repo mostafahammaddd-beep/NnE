@@ -5,6 +5,7 @@ import { WordCard } from "../components/rich.jsx";
 import { wordLines, parseWord } from "../lib/parse.js";
 import { useVocab, listLevel, vocabKey, dueWords } from "../lib/vocab.js";
 import ReviewModal from "../components/ReviewModal.jsx";
+import FontSizer, { ScaledBox } from "../components/FontSizer.jsx";
 
 /* The dictionary holds ONLY the words you classified:
      ⭐ مهمة جدا window · ✓ مهمة window.
@@ -50,6 +51,7 @@ export default function WordsScreen({ words, onOpen, onClearLegacy, onDeleteWord
     <div className="page page-wide sec-violet">
       <div className="page-head">
         <h1>قاموس الكلمات</h1>
+        <FontSizer id="words:dict" label="حجم خط القاموس" />
         <button onClick={() => setReview(true)} className="btn btn-teal btn-sm" disabled={!very.length && !imp.length}>
           <Icon name="refresh" size={16} /> راجع {due ? `(${due})` : ""}
         </button>
@@ -91,14 +93,14 @@ export default function WordsScreen({ words, onOpen, onClearLegacy, onDeleteWord
           {!needle && empty[1] && <p>{empty[1]}</p>}
         </div>
       ) : (
-        <div className="wlist" style={{ marginTop: 14 }}>
+        <ScaledBox id="words:dict" className="wlist" style={{ marginTop: 14 }}>
           {list.map((e, i) => (
             <div key={e.key || e.term}>
               <WordCard onDelete={() => onDeleteWord(e.term)} line={e.line} src={{ qid: e.qid, title: e.title }} ahead={list.slice(i + 1, i + 2).map((y) => y.term).join("\n")} />
               {e.qid && <button type="button" className="dict-src" onClick={() => onOpen(e.qid)} dir="auto">من: {e.title || "السؤال"}</button>}
             </div>
           ))}
-        </div>
+        </ScaledBox>
       )}
     {review && <ReviewModal onClose={() => setReview(false)} />}
     </div>

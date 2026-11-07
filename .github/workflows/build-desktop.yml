@@ -43,6 +43,9 @@ jobs:
         env:
           # Optional: same GEMINI_API_KEY secret as the APK build
           VITE_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          VITE_GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          VITE_OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          VITE_MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
 
       - name: Upload installer + portable exe
         uses: actions/upload-artifact@v4

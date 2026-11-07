@@ -9,6 +9,9 @@ const BRAND = "#1CA3BE";
    so the browser blocked every translation reply ("مقدرتش أترجمها" with a perfect connection). */
 const CORS_HOSTS = [
   "https://generativelanguage.googleapis.com/*",   // Gemini
+  "https://api.groq.com/*",                        // extra free engines (v3.26)
+  "https://openrouter.ai/*",
+  "https://api.mistral.ai/*",
   "https://translate.googleapis.com/*",            // translation: Google
   "https://translate.google.com/*",
   "https://clients5.google.com/*",
@@ -69,9 +72,12 @@ app.whenReady().then(() => {
       if (!/^access-control-allow-/i.test(k)) headers[k] = v;
     }
     headers["Access-Control-Allow-Origin"] = ["*"];
-    headers["Access-Control-Allow-Headers"] = ["*"];
+    /* "*" does NOT cover the Authorization header (browser rule), which the extra engines (Groq · OpenRouter · Mistral) use → listed by name */
+    headers["Access-Control-Allow-Headers"] = ["authorization, content-type, x-goog-api-key, *"];
     headers["Access-Control-Allow-Methods"] = ["GET, POST, OPTIONS"];
-    cb({ responseHeaders: headers });
+    /* a preflight must be answered with a 2xx; some APIs answer OPTIONS with 401/405 */
+    if (details.method === "OPTIONS") cb({ responseHeaders: headers, statusLine: "HTTP/1.1 204 No Content" });
+    else cb({ responseHeaders: headers });
   });
 
   createWindow();

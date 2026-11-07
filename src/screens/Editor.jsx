@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from "
 import Icon from "../components/Icon.jsx";
 import { AutoTextArea, ConfirmButton } from "../components/ui.jsx";
 import { Monitor } from "../components/Progress.jsx";
+import FontSizer from "../components/FontSizer.jsx";
+import { useTextScale, scaleStyle } from "../lib/textscale.js";
 import { RichText, QuestionView, WordList } from "../components/rich.jsx";
 import { CHIPS, MODES, sectionsFor, EMPTY_RESULT } from "../lib/config.js";
 import { createAnalysis, TASK_KEYS } from "../lib/analysis.js";
@@ -14,6 +16,8 @@ import { store } from "../lib/storage.js";
 import { stamp } from "../lib/time.js";
 import { wordLines } from "../lib/parse.js";
 import { detectQuestions, runBatch, focusNote } from "../lib/batch.js";
+import { bestField } from "../lib/library.js";
+import { flashPassage, clearFlash } from "../lib/highlight.js";
 
 const TASK_OF = { original_question_text: "ocr", new_words: "words", explanation: "reason", tricks: "reason" };
 const NULLS = { original_question_text: null, new_words: null, explanation: null, tricks: null };
@@ -31,8 +35,9 @@ const Skeleton = ({ hint }) => (
   </div>
 );
 
-const ResultSection = memo(function ResultSection({ section, value, onChange, running, error, note, onRetry, defaultOpen, src }) {
+const ResultSection = memo(function ResultSection({ section, value, onChange, running, error, note, onRetry, defaultOpen, src, scaleId, forceOpen }) {
   const { key, title, sub, icon, rows, cls, ltr, wait } = section;
+  const [ts] = useTextScale(scaleId);   // this card's own text size (see lib/textscale.js): no other card is touched
   const [editing, setEditing] = useState(false);
   const [copied, setCopied] = useState(false);
   const [open, setOpen] = useState(defaultOpen);
@@ -42,6 +47,8 @@ const ResultSection = memo(function ResultSection({ section, value, onChange, ru
 
   /* a section that starts working, or fails, opens by itself so nothing important stays hidden */
   useEffect(() => { if (running || error) setOpen(true); }, [running, !!error]); // eslint-disable-line react-hooks/exhaustive-deps
+  /* opened from a chat answer: the section that holds the highlighted part must be open */
+  useEffect(() => { if (forceOpen) setOpen(true); }, [forceOpen]);
 
   const copy = async () => {
     try { await navigator.clipboard.writeText(value || ""); setCopied(true); setTimeout(() => setCopied(false), 1400); }
@@ -49,7 +56,7 @@ const ResultSection = memo(function ResultSection({ section, value, onChange, ru
   };
 
   return (
-    <section className={`sec ${cls}`} data-open={open}>
+    <section className={`sec ${cls}`} data-open={open} data-field={key}>
       <header className="sec-head">
         <button type="button" className="sec-toggle" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
           <span className="sec-ico"><Icon name={icon} size={21} /></span>
@@ -61,21 +68,26 @@ const ResultSection = memo(function ResultSection({ section, value, onChange, ru
             <p>{sub}</p>
           </span>
         </button>
-        {open && canTool && (
+        {open && (!pending || canTool) && (
           <div className="sec-tools">
-            <button className="iconbtn" onClick={() => setEditing((e) => !e)} aria-label={editing ? "تم" : `تعديل ${title}`}>
-              <Icon name={editing ? "check" : "pencil"} size={16} />
-            </button>
-            <button className="iconbtn" onClick={copy} aria-label={`نسخ ${title}`}>
-              <Icon name={copied ? "check" : "copy"} size={16} />
-            </button>
+            {!pending && <FontSizer id={scaleId} label={`حجم خط ${title}`} />}
+            {canTool && (
+              <>
+                <button className="iconbtn" onClick={() => setEditing((e) => !e)} aria-label={editing ? "تم" : `تعديل ${title}`}>
+                  <Icon name={editing ? "check" : "pencil"} size={16} />
+                </button>
+                <button className="iconbtn" onClick={copy} aria-label={`نسخ ${title}`}>
+                  <Icon name={copied ? "check" : "copy"} size={16} />
+                </button>
+              </>
+            )}
           </div>
         )}
         <button type="button" className="sec-chev" aria-expanded={open} aria-label={open ? `اقفل ${title}` : `افتح ${title}`} onClick={() => setOpen((o) => !o)}>
           <Icon name="chevron" size={20} />
         </button>
       </header>
-      {open && <div className="sec-body">
+      {open && <div className="sec-body ts-box" style={scaleStyle(ts)}>
         {pending ? (
           <Skeleton hint={running ? wait : null} />
         ) : editing ? (
@@ -143,7 +155,7 @@ function BatchPanel({ batch, onOpen, onStop, onClose }) {
   );
 }
 
-export default function Editor({ initial, history, kind: kindProp, boot, apiKey, perf, onLearn, onNeedKey, onSave, onDelete, nav, onNavTo, onOpenTopic, onMove, library, onOpenItem }) {
+export default function Editor({ initial, history, kind: kindProp, boot, apiKey, perf, onLearn, onNeedKey, onSave, onDelete, nav, onNavTo, onOpenTopic, onMove, library, onOpenItem, highlight, onHighlightShown }) {
   const kind = initial?.kind || kindProp || "question";   // "question" (exam question) | "lesson" (study material → explanation)
   const isLesson = kind === "lesson";
   const sections = sectionsFor(kind);
@@ -192,6 +204,26 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
   const running = Object.values(status).some((s) => s === "run");
   const canChat = !running && !!((result?.original_question_text || "").trim() || (result?.explanation || "").trim());
   const started = !!result;
+
+  /* ── opened from a chat answer (v3.25): open the section that holds the part the answer came from, highlight that part, scroll to it.
+     The highlight removes itself after 8 s (lib/highlight.js). */
+  const [force, setForce] = useState(null);
+  useEffect(() => {
+    if (!highlight || !highlight.text || !result) return undefined;
+    const field = bestField(result, highlight.text);
+    const shown = () => { onHighlightShown && onHighlightShown(); };
+    if (!field) { shown(); return undefined; }
+    setForce({ key: field, n: highlight.nonce || Date.now() });
+    let tries = 0, stop = false, t = 0;
+    const attempt = () => {
+      if (stop) return;
+      if (flashPassage(field, highlight.text)) { shown(); return; }
+      if (++tries < 14) t = setTimeout(attempt, 120); else shown();   // the section needs a moment to open and draw
+    };
+    t = setTimeout(attempt, 180);
+    return () => { stop = true; clearTimeout(t); };
+  }, [highlight && highlight.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => clearFlash(), []);
 
   /* ── auto-save ──
      A finished analysis saves itself; later edits (text, title, instructions, picture) are saved a moment after you stop.
@@ -619,7 +651,7 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
               return (
                 <ResultSection key={s.key} section={s} value={result[s.key]} onChange={setField}
                   running={status[task] === "run"} error={s.key === "tricks" ? null : errors[task]} note={notes[task]}
-                  onRetry={retry} defaultOpen={!initial} src={wsrc} />
+                  onRetry={retry} defaultOpen={!initial} forceOpen={force && force.key === s.key ? force.n : 0} src={wsrc} scaleId={`${isLesson ? "l" : "q"}:${s.key}`} />
               );
             })}
           </div>

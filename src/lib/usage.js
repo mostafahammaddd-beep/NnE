@@ -35,9 +35,10 @@ function save(u) {
 
 export const readUsage = () => load();
 
-export function trackRequest(model) {
+/* ext = a request to an extra free engine (Groq · OpenRouter · Mistral): it has its own quota, so it is NOT part of Google's total */
+export function trackRequest(model, ext = false) {
   const u = load();
-  u.total += 1;
+  if (ext) u.ext = (u.ext || 0) + 1; else u.total += 1;
   u.byModel[model] = (u.byModel[model] || 0) + 1;
   save(u);
 }

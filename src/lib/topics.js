@@ -27,6 +27,28 @@ export function shapeTopics(raw) {
   };
 }
 
+/* "question" (exam question) or "lesson" (study material → explanation). Old items without a kind are questions. */
+export const kindOf = (q) => (q && q.kind === "lesson" ? "lesson" : "question");
+
+/* v3.25 migration: a topic from an older version may hold questions AND lessons. Each topic gets a kind; a mixed one is split in two
+   (same name and emoji, one per kind) so every section shows only its own items. Returns the SAME object when nothing had to change. */
+export function splitByKind(state, questions) {
+  const by = new Map((questions || []).map((q) => [q.id, q]));
+  let changed = false;
+  const list = [];
+  for (const t of state.list || []) {
+    if (t.kind === "question" || t.kind === "lesson") { list.push(t); continue; }
+    changed = true;
+    const qs = t.qids.filter((id) => by.has(id) && kindOf(by.get(id)) === "question");
+    const ls = t.qids.filter((id) => by.has(id) && kindOf(by.get(id)) === "lesson");
+    if (qs.length && ls.length) {
+      list.push({ ...t, kind: "question", qids: qs, overview: "", overviewSig: undefined });
+      list.push({ ...t, id: uid(), kind: "lesson", qids: ls, overview: "", overviewSig: undefined });
+    } else if (qs.length || ls.length) list.push({ ...t, kind: qs.length ? "question" : "lesson", qids: qs.length ? qs : ls });
+  }
+  return changed ? { ...state, list } : state;
+}
+
 export const topicOf = (topics, qid) => (topics.list || []).find((t) => t.qids.includes(qid)) || null;
 export const assignedSet = (topics) => new Set((topics.list || []).flatMap((t) => t.qids));
 
@@ -46,14 +68,14 @@ function tidy(state, validIds) {
   return { ...state, list, pinned: state.pinned.filter((id) => !validIds || validIds.has(id)) };
 }
 
-/* ops: {type:"reset"} | {type:"add", id, qids} | {type:"new", id, name, emoji, summary, qids} */
+/* ops: {type:"reset", kind?} | {type:"add", id, kind, qids} | {type:"new", id, kind, name, emoji, summary, qids}   (kind = "question" | "lesson": a topic only takes items of its own kind) */
 export function applyOps(state, ops, validIds) {
   let st = { ...state, list: state.list.map((t) => ({ ...t })) };
   const now = Date.now();
   for (const op of ops) {
     if (op.type === "reset") {
       const keep = new Set(st.pinned);
-      st.list = st.list.map((t) => ({ ...t, qids: t.qids.filter((id) => keep.has(id)), overview: t.overview && t.qids.every((id) => keep.has(id)) ? t.overview : "", overviewSig: undefined }));
+      st.list = st.list.map((t) => (op.kind && t.kind !== op.kind ? t : { ...t, qids: t.qids.filter((id) => keep.has(id)), overview: t.overview && t.qids.every((id) => keep.has(id)) ? t.overview : "", overviewSig: undefined }));
       continue;
     }
     const qids = (op.qids || []).filter((id) => !validIds || validIds.has(id));
@@ -63,25 +85,25 @@ export function applyOps(state, ops, validIds) {
     if (!fresh.length) continue;
     if (op.type === "add") {
       const t = st.list.find((x) => x.id === op.id);
-      if (!t) continue;
+      if (!t || (op.kind && t.kind && t.kind !== op.kind)) continue;
       t.qids = [...t.qids, ...fresh]; t.updatedAt = now;
     } else if (op.type === "new") {
       /* the same name again → merge into that topic instead of making a twin */
       const nm = flat(op.name).toLowerCase();
-      const twin = st.list.find((x) => flat(x.name).toLowerCase() === nm);
+      const twin = st.list.find((x) => flat(x.name).toLowerCase() === nm && (!op.kind || x.kind === op.kind));
       if (twin) { twin.qids = [...twin.qids, ...fresh]; twin.updatedAt = now; }
-      else st.list.push({ id: op.id || uid(), name: flat(op.name) || "موضوع جديد", emoji: op.emoji || "📘", summary: flat(op.summary), qids: fresh, overview: "", createdAt: now, updatedAt: now });
+      else st.list.push({ id: op.id || uid(), kind: op.kind || "question", name: flat(op.name) || "موضوع جديد", emoji: op.emoji || "📘", summary: flat(op.summary), qids: fresh, overview: "", createdAt: now, updatedAt: now });
     }
   }
   return tidy(st, validIds);
 }
 
 /* manual edits ─ each returns the new state */
-export function moveItem(state, qid, target /* topic id | {name} | null */) {
+export function moveItem(state, qid, target /* topic id | {name} | null */, kind = "question") {
   let list = state.list.map((t) => (t.qids.includes(qid) ? { ...t, qids: t.qids.filter((x) => x !== qid), updatedAt: Date.now() } : t));
   let pinned = state.pinned.filter((x) => x !== qid);
   if (target && typeof target === "object") {
-    list = [...list, { id: uid(), name: flat(target.name) || "موضوع جديد", emoji: "📘", summary: "", qids: [qid], overview: "", createdAt: Date.now(), updatedAt: Date.now() }];
+    list = [...list, { id: uid(), kind, name: flat(target.name) || "موضوع جديد", emoji: "📘", summary: "", qids: [qid], overview: "", createdAt: Date.now(), updatedAt: Date.now() }];
     pinned.push(qid);
   } else if (target) {
     list = list.map((t) => (t.id === target ? { ...t, qids: [...t.qids, qid], updatedAt: Date.now() } : t));
@@ -104,11 +126,10 @@ const digest = (q, i) => {
   return `i${i + 1} | ${q.kind === "lesson" ? "LESSON" : "QUESTION"} | ${cap(flat(q.title), 80)} | ${cap(flat(q.original_question_text), 240)}${terms ? ` | terms: ${terms}` : ""}${lead ? ` | ${lead}` : ""}`;
 };
 
-const ORG_SYSTEM = `You organize the study library of a nursing student preparing for the NCLEX-RN. Each item is either an exam QUESTION he practised or a LESSON (study material: book chapter, slides, notes, photos). Group items into TOPICS so that everything about the same subject sits together.
+const orgSystem = (kind) => `You organize the study library of a nursing student preparing for the NCLEX-RN. ${kind === "lesson" ? "Every item here is a LESSON (study material: book chapter, slides, notes, photos)." : "Every item here is an exam QUESTION he practised."} Group items into TOPICS so that everything about the same subject sits together. The app keeps questions and lessons in separate sections, so all items in this request are of the same type: group them by subject only.
 
 GROUPING RULES
 - Two items belong together when studying one helps with the other: same disease or condition, same drug or drug class, same lab / electrolyte, same procedure or nursing skill, same body-system concept, same textbook chapter or material.
-- A LESSON and the exam QUESTIONS about the same subject go in the SAME topic.
 - Prefer a topic that is broad enough to gather several items (a typical topic holds 2–10), but never merge unrelated subjects (e.g. do not put heart failure and insulin in one topic). An item with no real relative gets its own topic.
 - If an existing topic fits an item, use it. Create a new topic only when none fits.
 - Every item must be placed exactly once.
@@ -134,38 +155,45 @@ function parseJson(raw) {
 const CHUNK = 50;
 const ORG_CFG = { levels: ["minimal", "low"], budget: 0, maxOut: 8000, hedgeMs: 6000, firstMs: 60000, idleMs: 40000 };
 
-/* organise `todo` (questions without a topic) against the topics in `state`. `apply(ops)` is called after every request. */
+/* organise `todo` (items without a topic) against the topics in `state`. `apply(ops)` is called after every request.
+   v3.25: questions and lessons are organised SEPARATELY (one request series per kind), each against the topics of its own kind only. */
 export async function organize({ apiKey, todo, state, apply, signal, onProgress }) {
   const lists = getModelLists(apiKey);
   const models = [...lists.fast, ...lists.pro];
   let st = state;
   const placed = new Set();
-  const valid = new Set(todo.map((q) => q.id));
-  for (let c = 0; c < todo.length; c += CHUNK) {
-    if (signal && signal.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
-    const chunk = todo.slice(c, c + CHUNK);
-    onProgress && onProgress(Math.min(todo.length, c + CHUNK), todo.length);
-    const existing = st.list.slice(0, 80).map((t) => `${t.id} | ${t.name} | ${cap(t.summary, 90)} | ${t.qids.length} items`).join("\n");
-    const user = `${existing ? `EXISTING TOPICS (ref | name | summary | size):\n${existing}\n\n` : "There are no topics yet.\n\n"}ITEMS TO PLACE (id | type | title | text | terms | start of the explanation):\n${chunk.map(digest).join("\n")}\n\nReturn the JSON.`;
-    const res = await runTask({
-      apiKey, models, task: "topics:org", system: ORG_SYSTEM, parts: [{ text: user }],
-      spec: { levels: ORG_CFG.levels, budget: ORG_CFG.budget }, maxOut: ORG_CFG.maxOut, hedgeMs: ORG_CFG.hedgeMs, firstMs: ORG_CFG.firstMs, idleMs: ORG_CFG.idleMs, signal, onText: () => {},
-    });
-    let data;
-    try { data = parseJson(res.text); } catch (e) { throw Object.assign(new Error("الذكاء الاصطناعي رجّع رد مش مفهوم. جرّب تاني."), { detail: "topics: bad json" }); }
-    const idOf = (ref) => { const m = /^i(\d+)$/.exec(String(ref).trim()); return m ? (chunk[+m[1] - 1] || {}).id : null; };
-    const ops = [];
-    for (const t of Array.isArray(data.topics) ? data.topics : []) {
-      const qids = (Array.isArray(t.items) ? t.items : []).map(idOf).filter((id) => id && !placed.has(id));
-      if (!qids.length) continue;
-      const isExisting = st.list.some((x) => x.id === t.ref);
-      if (isExisting) ops.push({ type: "add", id: t.ref, qids });
-      else if (t.name && String(t.name).trim()) {
-        ops.push({ type: "new", id: uid(), name: fixText(String(t.name)).slice(0, 60), emoji: Array.from(String(t.emoji || "📘"))[0] || "📘", summary: fixText(String(t.summary || "")).slice(0, 160), qids });
+  /* every id that exists: the local copy of the topics must keep the members of topics that are not part of this run (they are only used as context) */
+  const valid = new Set([...todo.map((q) => q.id), ...state.list.flatMap((t) => t.qids)]);
+  let sent = 0;
+  for (const kind of ["question", "lesson"]) {
+    const mine = todo.filter((q) => kindOf(q) === kind);
+    for (let c = 0; c < mine.length; c += CHUNK) {
+      if (signal && signal.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      const chunk = mine.slice(c, c + CHUNK);
+      onProgress && onProgress(Math.min(todo.length, sent + chunk.length), todo.length);
+      const existing = st.list.filter((t) => t.kind === kind).slice(0, 80).map((t) => `${t.id} | ${t.name} | ${cap(t.summary, 90)} | ${t.qids.length} items`).join("\n");
+      const user = `${existing ? `EXISTING TOPICS (ref | name | summary | size):\n${existing}\n\n` : "There are no topics yet.\n\n"}ITEMS TO PLACE (id | type | title | text | terms | start of the explanation):\n${chunk.map(digest).join("\n")}\n\nReturn the JSON.`;
+      const res = await runTask({
+        apiKey, models, task: "topics:org", system: orgSystem(kind), parts: [{ text: user }],
+        spec: { levels: ORG_CFG.levels, budget: ORG_CFG.budget }, maxOut: ORG_CFG.maxOut, hedgeMs: ORG_CFG.hedgeMs, firstMs: ORG_CFG.firstMs, idleMs: ORG_CFG.idleMs, signal, onText: () => {},
+      });
+      let data;
+      try { data = parseJson(res.text); } catch (e) { throw Object.assign(new Error("الذكاء الاصطناعي رجّع رد مش مفهوم. جرّب تاني."), { detail: "topics: bad json" }); }
+      const idOf = (ref) => { const m = /^i(\d+)$/.exec(String(ref).trim()); return m ? (chunk[+m[1] - 1] || {}).id : null; };
+      const ops = [];
+      for (const t of Array.isArray(data.topics) ? data.topics : []) {
+        const qids = (Array.isArray(t.items) ? t.items : []).map(idOf).filter((id) => id && !placed.has(id));
+        if (!qids.length) continue;
+        const isExisting = st.list.some((x) => x.id === t.ref && x.kind === kind);
+        if (isExisting) ops.push({ type: "add", id: t.ref, kind, qids });
+        else if (t.name && String(t.name).trim()) {
+          ops.push({ type: "new", id: uid(), kind, name: fixText(String(t.name)).slice(0, 60), emoji: Array.from(String(t.emoji || "📘"))[0] || "📘", summary: fixText(String(t.summary || "")).slice(0, 160), qids });
+        }
+        qids.forEach((id) => placed.add(id));
       }
-      qids.forEach((id) => placed.add(id));
+      if (ops.length) { st = applyOps(st, ops, valid); apply(ops); }
+      sent += chunk.length;
     }
-    if (ops.length) { st = applyOps(st, ops, valid); apply(ops); }
   }
   return placed.size;
 }

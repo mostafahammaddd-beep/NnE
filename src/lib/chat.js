@@ -7,8 +7,26 @@ import { getModelLists, runTask } from "./gemini.js";
 import { sourceParts, sourceNote } from "./docs.js";
 import { ARABIC_RULE } from "./text.js";
 import { libraryContext } from "./library.js";
+import { createFileCache, looksLikeFileError } from "./gfiles.js";
+import { isBigAsk, runSliced, PLAN_SYSTEM, sliceInstruction } from "./chatflow.js";
+import { getEnginePrefs } from "./providers.js";
 
-const CFG = { levels: ["high", "medium"], budget: 4096, maxOut: 12000, firstMs: 90000, idleMs: 60000, hedgeMs: 8000 };
+/* v3.26 — the tutor chat was slow for three reasons, all fixed here:
+   1 · it ALWAYS asked Gemini to think at the "high" level (4096-token budget): seconds of silence before the first word, for a
+       "what does this mean?" question. Now a normal question thinks "low"; an objection, a calculation or a "compare / why" gets "medium".
+   2 · for study material, every message re-sent the whole PDF / page images (up to 14 MB). Now they are uploaded once and remembered.
+   3 · the library context sat inside the system prompt, so the system prompt changed on every message and Gemini's automatic prompt
+       cache never hit. Now the system prompt is the same for the whole conversation and the changing part goes last.
+   Big requests ("explain everything in detail") are written in parallel sections (chatflow.js). */
+const CFG = { maxOut: 12000, firstMs: 90000, idleMs: 60000 };
+
+const HARD = /(معترض|مش موافق|غلط|ليه|لماذا|why|wrong|disagree|object|compar|قارن|فرق|احسب|calculate|dose|جرعة|اثبت|prove|تأكد|re-?check|الصح)/i;
+export function thinkFor(text) {
+  const t = String(text || "");
+  return HARD.test(t) || t.length > 400
+    ? { levels: ["medium", "low"], budget: 2048 }
+    : { levels: ["low", "minimal"], budget: 1024 };
+}
 const cap = (s, n) => ((s || "").length > n ? (s || "").slice(0, n) + "…" : (s || ""));
 
 const HOW_TO_REPLY = `How to reply:
@@ -51,7 +69,7 @@ ${ctx.tricks ? `\n=== TRAPS ALREADY SHOWN ===\n${cap(ctx.tricks, 3000)}` : ""}
 ${libBlock}${ARABIC_RULE}`;
 }
 
-export function askChat({ apiKey, history, ctx, chipIds = [], attach = [], library, signal, onText, onCodes }) {
+export async function askChat({ apiKey, history, ctx, chipIds = [], attach = [], library, signal, onText, onCodes }) {
   const lists = getModelLists(apiKey);
   const models = [...lists.fast, ...lists.pro];
   const turns = history
@@ -59,18 +77,23 @@ export function askChat({ apiKey, history, ctx, chipIds = [], attach = [], libra
     .slice(-12)
     .map((m) => `${m.role === "user" ? "Student" : "Tutor"}: ${cap(m.text, m.role === "user" ? 2000 : 1800)}${m.atts && m.atts.length ? ` [attached: ${m.atts.map((a) => a.name).join(", ")}]` : ""}`)
     .join("\n\n");
-  const user = `${turns}\n\nWrite the Tutor's next reply to the student's last message.`;
+  const userTurns = history.filter((m) => m.role === "user" && m.text);
+  const lastText = (userTurns[userTurns.length - 1] || {}).text || "";
 
   /* what the student is asking about right now → which saved items to show the model in full */
   let lib = null;
   if (library && library.questions && library.questions.length) {
-    const users = history.filter((m) => m.role === "user" && m.text);
-    const last = users[users.length - 1];
-    const before = users[users.length - 2];
+    const last = userTurns[userTurns.length - 1];
+    const before = userTurns[userTurns.length - 2];
     const query = [last && last.text, last && last.text.length < 40 && before ? before.text : "", ctx.title || "", ctx.kind === "global" ? "" : cap(ctx.question, 200)].filter(Boolean).join("\n");
     lib = libraryContext({ questions: library.questions, topics: library.topics, query, focusId: library.focusId, focusTopicId: library.focusTopicId });
     if (onCodes && lib.codes) onCodes(lib.codes);
   }
+  /* the changing part (library context + the conversation) goes LAST: the system prompt and the files in front of it stay identical
+     from one message to the next, which is what lets Gemini reuse its cache */
+  const libText = lib && lib.text ? `${lib.text}\n\n` : "";
+  const user = `${libText}${turns}\n\nWrite the Tutor's next reply to the student's last message.`;
+  const system = buildSystem(ctx, chipIds, null);
 
   const hasText = !!(ctx.question && ctx.question.trim());
   const attachCtx = ctx.kind !== "global" && (ctx.kind === "lesson" || !hasText);   // study material: the model always sees the real files
@@ -78,13 +101,38 @@ export function askChat({ apiKey, history, ctx, chipIds = [], attach = [], libra
   const files = attach.length
     ? [{ text: "The student attached these files to his LAST message (read them and use them in your answer):" }, ...sourceParts({ kind: "bundle", items: attach }, null)]
     : [];
-  const parts = [...base, ...files, { text: user }];
-  return runTask({
-    apiKey, models, task: "lesson:chat", system: buildSystem(ctx, chipIds, lib), parts,
-    spec: { levels: CFG.levels, budget: CFG.budget },
-    maxOut: CFG.maxOut, hedgeMs: CFG.hedgeMs, firstMs: CFG.firstMs, idleMs: CFG.idleMs,
-    signal, onText,
-  });
+  const media = [...base, ...files];
+
+  /* big files are uploaded once and remembered (lib/gfiles.js); any problem → they go inline, exactly as before */
+  const cache = createFileCache({ apiKey, persist: true });
+  const think = thinkFor(lastText);
+  const one = async (sys, usr, task, spec, maxOut, cb) => {
+    const call = async (useFiles) => runTask({
+      apiKey, models, task, system: sys,
+      parts: [...(useFiles ? await cache.swap(media, signal) : media), { text: usr }],
+      spec, maxOut, firstMs: CFG.firstMs, idleMs: CFG.idleMs, signal, onText: cb,
+    });
+    try { return await call(true); }
+    catch (e) {
+      if (cache.used && !(e && e.name === "AbortError") && !(signal && signal.aborted) && looksLikeFileError(e)) { cache.disable(); return call(false); }
+      throw e;
+    }
+  };
+
+  /* a big request: outline → sections written at the same time (never for a short question, never when the student turned it off) */
+  if (getEnginePrefs().slice && isBigAsk(lastText, { files: attach.length })) {
+    const sliced = await runSliced({
+      signal, onText, maxSlices: 3,
+      ask: (kind, cb) => {
+        if (kind === "plan") {
+          return one(PLAN_SYSTEM, `${cap(turns, 3500)}\n\nReturn the JSON outline for the student's last message.`, "lesson:chatplan", { levels: ["minimal", "low"], budget: 0 }, 1200);
+        }
+        return one(system + sliceInstruction(kind.outline, kind.slice), user, "lesson:chatpart", think, CFG.maxOut, cb);
+      },
+    });
+    if (sliced.sliced) return { text: sliced.text, model: sliced.model };
+  }
+  return one(system, user, "lesson:chat", think, CFG.maxOut, onText);
 }
 
 

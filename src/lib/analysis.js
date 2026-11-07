@@ -10,12 +10,14 @@
    Before v3.23: ocr + words + solve + lessonA + lessonB (+ glitch rewrites + duplicate "hedged" fallbacks).
    Now: no rewrites, no duplicates; a busy moment is handled by the retry engine (2 s · 4 s · 8 s) in gemini.js. */
 
-import { MODES, LESSON_MODE } from "./config.js";
-import { buildOcrPrompt, buildWordsPrompt, buildSolvePrompt, buildLessonPrompt, buildLessonAPrompt, buildLessonBPrompt, buildStudySummaryPrompt, buildStudyLessonPrompt, buildStudyAPrompt, buildStudyBPrompt } from "./prompts.js";
+import { MODES, LESSON_MODE, LESSON_SLICES, SLICE_MIN_PAGES } from "./config.js";
+import { buildOcrPrompt, buildWordsPrompt, buildSolvePrompt, buildLessonPrompt, buildLessonAPrompt, buildLessonBPrompt, buildStudySummaryPrompt, buildStudyLessonPrompt, buildStudyAPrompt, buildStudyBPrompt, buildStudyHeadPrompt, buildStudySlicePrompt, buildStudyTailPrompt, studyHeadings } from "./prompts.js";
+import { createSlicedLesson, shouldSlice } from "./lessonflow.js";
 import { fixText, ARABIC_RULE } from "./text.js";
 import { cleanOcr, cleanWords, cleanBrief, splitReason } from "./parse.js";
 import { getModelLists, runTask } from "./gemini.js";
 import { sourceParts, sourceNote } from "./docs.js";
+import { createFileCache, looksLikeFileError } from "./gfiles.js";
 
 export const TASK_KEYS = {
   ocr: ["original_question_text"],
@@ -25,7 +27,7 @@ export const TASK_KEYS = {
 
 const SIMPLE_CFG = {
   ocr: { tier: "fast", levels: ["minimal", "low"], budget: 0, maxOut: 4000, firstMs: 40000, idleMs: 30000 },
-  words: { tier: "fast", levels: ["low", "minimal"], budget: 512, maxOut: 12000, firstMs: 40000, idleMs: 30000 },
+  words: { tier: "fast", levels: ["low", "minimal"], budget: 1024, maxOut: 12000, firstMs: 45000, idleMs: 30000 },   // 1024: the model has to check every word's CEFR level, a few more thinking tokens make that check honest
 };
 
 const isAbort = (err) => !err || err.name === "AbortError";
@@ -43,17 +45,31 @@ export function createAnalysis({ kind = "question", history, dataUrl, doc, extra
   const fastFirst = [...lists.fast, ...lists.pro];
   const proFirst = [...lists.pro, ...lists.fast];
 
+  /* the big files of the source are uploaded ONCE and every request refers to them by a link (lib/gfiles.js); small sources stay inline */
+  const files = createFileCache({ apiKey });
+
   /* one model call (one request at a time; busy → retried with backoff inside runTask) */
-  const stageOnce = (task, cfg, prompt, signal, onText) => runTask({
-    apiKey, task,
-    models: cfg.tier === "pro" ? proFirst : fastFirst,
-    system: prompt.system + (L || task !== "ocr" ? ARABIC_RULE : ""),   // the OCR transcript must stay exactly as written
-    parts: [...src, { text: note + prompt.user }],
-    spec: { levels: cfg.levels, budget: cfg.budget },
-    maxOut: cfg.maxOut, firstMs: cfg.firstMs, idleMs: cfg.idleMs,
-    signal, onText,
-    onNotice: onNotice ? (x) => onNotice(/^(solve|lesson)/.test(task) ? "reason" : task, x) : undefined,   // "Google is busy, trying again (n of 3)" → a calm note, not an error
-  });
+  const stageOnce = async (task, cfg, prompt, signal, onText) => {
+    const call = async (useFiles) => {
+      const all = [...src, { text: note + prompt.user }];
+      return runTask({
+        apiKey, task,
+        models: cfg.tier === "pro" ? proFirst : fastFirst,
+        system: prompt.system + (L || task !== "ocr" ? ARABIC_RULE : ""),   // the OCR transcript must stay exactly as written
+        parts: useFiles ? await files.swap(all, signal) : all,
+        spec: { levels: cfg.levels, budget: cfg.budget },
+        maxOut: cfg.maxOut, firstMs: cfg.firstMs, idleMs: cfg.idleMs,
+        signal, onText,
+        onNotice: onNotice ? (x) => onNotice(/^(solve|lesson)/.test(task) ? "reason" : task, x) : undefined,   // "Google is busy, trying again (n of 3)" → a calm note, not an error
+      });
+    };
+    try { return await call(true); }
+    catch (e) {
+      /* Google could not use the uploaded file → send everything inline from now on (exactly the old behaviour) and repeat this request */
+      if (files.used && !isAbort(e) && !(signal && signal.aborted) && looksLikeFileError(e)) { files.disable(); return call(false); }
+      throw e;
+    }
+  };
 
   /* The model now and then drops stray letters of another script inside Arabic words. text.js already removes them from the
      screen. (v3.23: the old "ask for a full clean rewrite" is gone — on a 2000-word lesson it silently DOUBLED the waiting time.) */
@@ -333,8 +349,34 @@ export function createAnalysis({ kind = "question", history, dataUrl, doc, extra
     }
   }
 
+  /* ── reason, SLICED (long study material): plan → several tutors write their topics at the same moment (lib/lessonflow.js) ── */
+  const sliced = L && LESSON_MODE !== "single" && shouldSlice({ doc, slices: LESSON_SLICES, minPages: SLICE_MIN_PAGES });
+  function runReasonSliced() {
+    live.reason?.abort();
+    const flow = createSlicedLesson({
+      stage,
+      prompts: {
+        head: (w) => buildStudyHeadPrompt({ history, extra, chips, words: w }),
+        slice: (o) => buildStudySlicePrompt({ history, extra, chips, ...o }),
+        tail: (w) => buildStudyTailPrompt({ history, extra, chips, words: w }),
+      },
+      cfg: {
+        head: { ...mode.write, maxOut: Math.min(mode.write.maxOut, 8000) },
+        slice: mode.writeA || mode.write,                       // the same model settings the single "basics" request had
+        tail: { ...mode.write, maxOut: Math.min(mode.write.maxOut, 9000) },
+      },
+      headings: studyHeadings(chips),
+      words: { head: Math.round(wordsCap.a * 0.22), basics: Math.round(wordsCap.a * 0.78), must: Math.round(wordsCap.b * 0.5), tail: Math.round(wordsCap.b * 0.52) },
+      maxSlices: LESSON_SLICES,
+      onUpdate, onDone, onError,
+    });
+    live.reason = { abort: () => flow.abort() };
+    flow.start();
+  }
+
   function runReason() {
-    if (LESSON_MODE === "single") runReasonSingle();
+    if (sliced) runReasonSliced();
+    else if (LESSON_MODE === "single") runReasonSingle();
     else if (LESSON_MODE === "split") runReasonSplit();
     else runReasonFast();
   }
@@ -348,6 +390,6 @@ export function createAnalysis({ kind = "question", history, dataUrl, doc, extra
     start() { ["ocr", "reason", "words"].forEach(run); }, // ocr first: it is what the student sees first
     retry(name) { if (TASK_KEYS[name]) run(name); },
     stop(name) { live[name]?.abort(); },
-    cancel() { Object.values(live).forEach((c) => c.abort()); },
+    cancel() { Object.values(live).forEach((c) => c.abort()); files.cancel(); },
   };
 }

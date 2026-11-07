@@ -1,4 +1,11 @@
 /* ───────────── Gemini networking ─────────────
+   v3.26 — LANES (read this before everything else; the details are in router.js and providers.js)
+   • The retry engine no longer WAITS for a busy model. Every model (and every extra free engine: Groq · OpenRouter · Mistral) is a "lane"
+     with its own quota. A lane that answers 429 / 503 / hangs is put to sleep for a while and the request moves to the next lane at once.
+   • Equal-quality lanes are load-balanced, so the parallel requests of one analysis land on different models (different per-minute quotas).
+   • HEDGING across lanes: a lane that has sent nothing at all after a few seconds is raced by another lane (another quota bucket);
+     the first sign of life wins and the other request is cancelled. It never doubles traffic on one model (the v3.23 problem).
+   • We never rotate Google projects/keys to dodge limits: Google restricts projects that do that, and its limits are per project anyway.
    v3.23 — 429 / 503 FIX (read this first)
    • NO MORE HEDGING: the old engine started a SECOND request to another model whenever the first was slow. Google counts every
      request, so a busy moment doubled the traffic and kept the key rate-limited. Now there is exactly ONE request at a time.
@@ -31,6 +38,14 @@
 
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { MODEL_FAST, MODEL_PRO } from "./config.js";
+import {
+  taskClass, mediaOf, estimateTokens, planLanes, hedgeDelayMs, nextReadyIn, readyLanes,
+  begin as laneBegin, noteOk, noteBusy, noteDead, noteTooBig, noteSlow, clearDead as clearDeadLanes,
+} from "./router.js";
+import {
+  PROVIDERS, getExtKeys, getExtLanes, refreshLanes, markExtDead, getEngineMode, answerBudget, buildBody,
+  streamChat, nativeChat, bearer,
+} from "./providers.js";
 
 const ENV = (typeof import.meta !== "undefined" && import.meta.env) || {};
 import { trackRequest, noteQuota } from "./usage.js";
@@ -106,11 +121,12 @@ function normalizeResponse(status, data) {
   return { status, json: json && typeof json === "object" ? json : {} };
 }
 
-export async function rawRequest(method, url, body, timeoutMs, apiKey) {
+/* generic: any headers (Gemini: x-goog-api-key · extra engines: Authorization: Bearer …) */
+export async function rawRequestH(method, url, body, timeoutMs, headers) {
   const errors = [];
   if (Capacitor.isNativePlatform()) {
     try {
-      const opts = { url, method, headers: hdrs(apiKey), connectTimeout: 30000, readTimeout: timeoutMs };
+      const opts = { url, method, headers, connectTimeout: 30000, readTimeout: timeoutMs };
       if (body !== undefined) opts.data = body;
       const r = await CapacitorHttp.request(opts);
       return normalizeResponse(r.status, r.data);
@@ -119,7 +135,7 @@ export async function rawRequest(method, url, body, timeoutMs, apiKey) {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    const init = { method, headers: hdrs(apiKey), signal: ctrl.signal };
+    const init = { method, headers, signal: ctrl.signal };
     if (body !== undefined) init.body = JSON.stringify(body);
     const res = await fetch(url, init);
     const text = await res.text();
@@ -130,6 +146,8 @@ export async function rawRequest(method, url, body, timeoutMs, apiKey) {
   }
   throw Object.assign(new Error("مفيش اتصال بسيرفرات Google. اتأكد من النت وجرّب تاني."), { detail: errors.join(" | ") });
 }
+
+export const rawRequest = (method, url, body, timeoutMs, apiKey) => rawRequestH(method, url, body, timeoutMs, hdrs(apiKey));
 
 /* ── model lists (cached, never blocking) ── */
 
@@ -172,6 +190,7 @@ const clearDead = (apiKey) => {            // a fresh model list gives temporary
   const st = deadState(apiKey);
   st.map = {};
   saveDead(st);
+  clearDeadLanes("gemini:");
 };
 
 /* the replacement Google names inside a "no longer available" error is trusted for the next analysis too */
@@ -267,8 +286,32 @@ export async function testConnection(apiKey) {
   return `${pro[0]} + ${fast[0]}`;
 }
 
+/* the extra free engines: one line per configured provider (the model list call needs no quota) */
+export async function testExtProviders() {
+  const out = [];
+  for (const id of Object.keys(getExtKeys())) {
+    const label = PROVIDERS[id].label;
+    try {
+      const lanes = await refreshLanes(id, rawRequestH, { force: true });
+      out.push(lanes.length
+        ? { id, label, ok: true, msg: `${label} شغال ✅ ${lanes.map((l) => l.model.replace(/^.*\//, "")).join(" · ")}` }
+        : { id, label, ok: false, msg: `${label}: المفتاح شغال بس مفيش موديل مناسب ظهر في القايمة.` });
+    } catch (e) {
+      const net = /Google/.test(e.message || "");
+      out.push({ id, label, ok: false, msg: net ? `${label}: مفيش اتصال (النت أو المتصفح بيمنع الطلب).` : e.message, detail: e.detail });
+    }
+  }
+  return out;
+}
+
+/* background: read the model lists of the extra engines (after a key was saved, and at start-up) */
+export function warmExternal() {
+  Object.keys(getExtKeys()).forEach((id) => refreshLanes(id, rawRequestH).catch(() => {}));
+}
+
 /* Fire-and-forget: refreshes the model list in the background. */
 export function warmUp(apiKey) {
+  warmExternal();
   if (!apiKey) return;
   refreshModels(apiKey).catch(() => {});
 }
@@ -512,50 +555,233 @@ function bestError(errs, tried) {
   return e;
 }
 
-/* public: run one task. Models are tried IN ORDER and only when the previous one is DEAD for this key (404 / retired / daily quota);
-   a busy model is retried with backoff, it is never duplicated onto another model. `hedgeMs` is accepted and ignored (old callers). */
+/* ── one attempt on ONE lane (a Gemini model or an extra free engine) ── */
+
+/* the phone's native HTTP client, as the "native" transport of providers.js (non-streaming) */
+const nativeJson = async (url, headers, body, timeoutMs) => {
+  const r = await CapacitorHttp.request({ url, method: "POST", headers, data: body, connectTimeout: 30000, readTimeout: timeoutMs });
+  return { status: r.status, data: r.data, headers: r.headers || {} };
+};
+const EXT_TRANSPORT = { fetch: (...a) => fetch(...a), abortError, timeoutError };
+const _extNative = {};          // provider → "the WebView cannot read its replies (CORS): use the native client until this time"
+
+async function attemptExternal({ lane, system, parts, spec, maxOut, signal, onText, onAlive, firstMs, idleMs }) {
+  const key = getExtKeys()[lane.provider];
+  if (!key) throw Object.assign(new Error("مفيش مفتاح للمحرك ده."), { ext: true, badKey: true, dead: true, detail: `[${lane.id}] no key` });
+  const promptTokens = estimateTokens(system, parts, 0);
+  const room = answerBudget(lane, promptTokens, maxOut);
+  if (room < 700) throw Object.assign(new Error("الطلب كبير على المحرك ده."), { ext: true, tooBig: true, detail: `[${lane.id}] prompt ≈ ${promptTokens} tokens` });
+
+  let extras = true;
+  for (;;) {
+    const body = buildBody({ lane, system, parts, spec, maxOut: room, extras });
+    trackRequest(lane.id, true);                              // counted on its own: Google's meter must not include it
+    const args = { lane, key, body, signal, onText, onAlive, firstMs: Math.min(firstMs || 45000, 45000), idleMs: Math.min(idleMs || 30000, 30000) };
+    try {
+      let out;
+      if (Date.now() < (_extNative[lane.provider] || 0)) {
+        out = await nativeChat({ ...args, native: nativeJson, abortError, timeoutError });
+      } else {
+        try { out = await streamChat({ ...args, transport: EXT_TRANSPORT }); }
+        catch (e) {
+          if (!(e && e.netBeforeStart && Capacitor.isNativePlatform())) throw e;
+          out = await nativeChat({ ...args, native: nativeJson, abortError, timeoutError });   // CORS: the native client is not subject to it
+          _extNative[lane.provider] = Date.now() + 6 * 3600e3;
+        }
+      }
+      if (!out.text.trim()) throw Object.assign(new Error("المحرك الإضافي رجّع رد فاضي."), { ext: true, emptyReply: true, detail: `[${lane.id}] ${out.finish || "empty"}` });
+      /* a reply that hit the token limit is cut in the middle: never show it as if it were complete */
+      if (out.finish === "length") throw Object.assign(new Error("الرد اتقطع."), { ext: true, cut: true, detail: `[${lane.id}] cut at ${room} tokens` });
+      return out;
+    } catch (e) {
+      if (e && e.paramBad && extras) { extras = false; continue; }
+      throw e;
+    }
+  }
+}
+
+function attemptLane(a) {
+  return a.lane.provider === "gemini"
+    ? attemptModel({ ...a, model: a.lane.model })
+    : attemptExternal(a);
+}
+
+/* ── the lane-aware engine ── */
+
+const MAX_STARTS = 10;            // lane attempts of one task (hedges included)
+const MAX_WAIT_MS = 40000;        // total time a task may spend ONLY waiting for lanes to wake up
+const MAX_HINT_MS = 25000;        // everything asleep for longer than this → say "busy" now instead of making the student stare at a spinner
+
+/* public: run one task.
+   1. planLanes() orders the lanes that can take this request (router.js)
+   2. the first ready lane starts; if it fails with "busy" the NEXT lane starts at once (no waiting); if it simply stays silent for a few
+      seconds a second lane is raced against it (hedging) and the first sign of life wins
+   3. only when EVERY lane is asleep does the engine wait — for the first one to wake up, never longer than MAX_WAIT_MS in total
+   `hedgeMs` is accepted and ignored (old callers). */
 export async function runTask({ apiKey, models, task, system, parts, spec, maxOut, firstMs, idleMs, signal, onText, onNotice }) {
-  /* callers that only want the final text pass no onText / signal: give the engine harmless defaults once */
   if (typeof onText !== "function") onText = () => {};
   if (!signal) signal = new AbortController().signal;
   if (signal.aborted) throw abortError();
 
   const order = [...new Set(models)];
   if (!order.length) throw new Error("مفيش موديل متاح دلوقتي.");
-  const errs = [], tried = [];
-  let shownLen = 0;
 
-  for (let i = 0; i < order.length; i++) {
-    const model = order[i];
-    if (deadSet(apiKey).has(model) && i < order.length - 1) continue;          // remembered as unavailable → do not waste a round trip
-    const emit = (text) => {
-      if (text.length < shownLen) return;       // a retried answer re-writes from the start: keep the old text on screen until it catches up
-      shownLen = text.length;
-      onText(text, model);
+  const cls = taskClass(task);
+  const mode = getEngineMode();
+  const media = mediaOf(parts);
+  /* how big the request is for a lane with a small token window: the prompt plus a realistic answer (not the generous maxOut cap) */
+  const tokens = estimateTokens(system, parts, Math.min(maxOut || 0, cls === "chat" ? 1500 : 3000));
+
+  const errs = [], tried = [];
+  let shownLen = 0, shownLane = "", waited = 0, starts = 0, notices = 0, timeouts = 0, lastErr = null;
+
+  const show = (lane, text) => {
+    if (shownLane !== lane.id) { shownLane = lane.id; shownLen = 0; }        // another lane writes the answer from its own start
+    if (text.length < shownLen) return;                                       // a retry on the same lane re-writes from the start: keep the longer text on screen
+    shownLen = text.length;
+    onText(text, lane.model);
+  };
+
+  const plan = () => {
+    const dead = deadSet(apiKey);
+    const live = order.filter((m) => !dead.has(m));
+    return planLanes({ geminiModels: live.length ? live : order, extLanes: getExtLanes(), cls, mode, media, tokens });
+  };
+
+  /* bookkeeping after a failed attempt; returns true when the whole task must stop */
+  const onFail = (lane, err) => {
+    tried.push(`${lane.model} → ${err.status || (err.timeout ? "timeout" : err.emptyReply ? "empty" : err.cut ? "cut" : err.tooBig ? "too-big" : "net")}${err.retired ? " (retired)" : ""}`);
+    errs.push(err);
+    lastErr = err;
+    if (lane.provider === "gemini") {
+      if (err.fatal || err.blocked) return true;                              // bad key · safety filter: another Gemini model would say the same
+      if (err.dead) {
+        addDead(apiKey, lane.model, !!err.retired);
+        noteDead(lane.id, err.retired ? RETIRED_TTL : DEAD_TTL);
+        if (err.retired) {
+          if (err.replacement) {
+            addSuggest(apiKey, err.replacement);
+            if (!order.includes(err.replacement) && !deadSet(apiKey).has(err.replacement)) order.push(err.replacement);
+          }
+          selfHeal(apiKey);
+        }
+        return false;
+      }
+      if (isTransient(err)) { noteBusy(lane.id, { status: err.status, retryAfterMs: err.retryAfterMs }); return false; }
+      return true;                                                             // any other Gemini error (bad request …): retrying cannot change it
+    }
+    /* an extra engine failing is never fatal for the task: the lane is put aside and the next lane answers */
+    if (err.dead || err.badKey) { markExtDead(lane.id, err.daily ? 5 * 3600e3 : err.badKey ? 3600e3 : 6 * 3600e3); noteDead(lane.id, err.daily ? 5 * 3600e3 : err.badKey ? 3600e3 : 6 * 3600e3); }
+    else if (err.tooBig || err.cut) noteTooBig(lane.id, tokens);
+    else noteBusy(lane.id, { status: err.status, retryAfterMs: err.retryAfterMs });
+    return false;
+  };
+
+  /* one race: start the first ready lane, fail over at once, hedge when it stays silent. Resolves with the answer, rejects with the last error. */
+  const race = (ready, hedgePool) => new Promise((resolve, reject) => {
+    const recs = [];
+    let winner = null, settled = false, hedgeTimer = null, last = null;
+    const running = () => recs.filter((r) => !r.over && !r.cancelled);
+    const stopAll = (except) => recs.forEach((r) => { if (r !== except && !r.over) { r.cancelled = true; r.ctrl.abort(); } });
+    const finish = (fn, v) => { if (settled) return; settled = true; clearTimeout(hedgeTimer); stopAll(null); fn(v); };
+    const nextLane = (pool) => pool.find((l) => !recs.some((r) => r.lane.id === l.id));
+
+    const armHedge = (rec) => {
+      clearTimeout(hedgeTimer);
+      if (winner || settled || running().length >= 2) return;                    // never more than two lanes at once
+      const nxt = nextLane(hedgePool.filter((l) => ready.includes(l)));
+      if (!nxt || starts >= MAX_STARTS) return;
+      const ms = hedgeDelayMs(cls, rec.lane);
+      hedgeTimer = setTimeout(() => {
+        if (winner || settled || signal.aborted) return;
+        noteSlow(rec.lane.id, ms);
+        start(nxt);
+      }, ms);
     };
+
+    const start = (lane) => {
+      starts += 1;
+      const ctrl = new AbortController();
+      const link = () => ctrl.abort();
+      signal.addEventListener("abort", link, { once: true });
+      const rec = { lane, ctrl, t0: Date.now(), aliveAt: 0, over: false, end: laneBegin(lane.id) };
+      recs.push(rec);
+      const claim = () => {
+        if (rec.aliveAt) return;
+        rec.aliveAt = Date.now();
+        if (!winner) { winner = rec; clearTimeout(hedgeTimer); stopAll(rec); }   // first sign of life wins; the others are cancelled
+      };
+      const closeRec = () => { rec.over = true; rec.end(); signal.removeEventListener("abort", link); };
+      attemptLane({
+        lane, apiKey, task, system, parts, spec, maxOut, signal: ctrl.signal, firstMs, idleMs,
+        onText: (t) => { if (winner === rec) show(lane, t); },
+        onAlive: claim,
+      }).then((res) => {
+        closeRec();
+        if (settled) return;
+        if (!winner) winner = rec;
+        noteOk(lane.id, rec.aliveAt ? rec.aliveAt - rec.t0 : Date.now() - rec.t0);
+        winner = rec;
+        show(lane, res.text);
+        finish(resolve, { ...res, model: lane.model, provider: lane.provider });
+      }, (err) => {
+        closeRec();
+        if (settled) return;
+        if (signal.aborted) return finish(reject, (err && err.name === "AbortError") ? err : abortError());
+        if (err && err.name === "AbortError") return;                            // a lane WE cancelled (it lost the race): silent
+        last = err;
+        const stop = onFail(lane, err);
+        if (winner === rec) winner = null;                                        // the lane that was writing died: the race is open again
+        if (stop) return finish(reject, err);
+        if (!running().length) {
+          const nxt = starts < MAX_STARTS ? nextLane(ready) : null;
+          if (nxt) start(nxt);                                                     // FAILOVER: no waiting, the next lane starts now
+          else finish(reject, last);
+        } else if (!winner) {
+          const r = running()[0];
+          armHedge(r);
+        }
+      });
+      if (!winner) armHedge(rec);
+    };
+
+    start(ready[0]);
+  });
+
+  for (;;) {
+    if (signal.aborted) throw abortError();
+    const { lanes, hedge } = plan();
+
+    /* quality mode keeps the extra engines out of the way unless Google really is away for long */
+    const gem = lanes.filter((l) => l.provider === "gemini");
+    const gemSoon = mode === "quality" && gem.length && !readyLanes(gem).length && nextReadyIn(gem) <= 8000;
+    const pool = gemSoon ? gem : lanes;
+    const ready = readyLanes(pool);
+
+    if (!ready.length) {
+      const left = nextReadyIn(pool);
+      if (!Number.isFinite(left) || starts >= MAX_STARTS) throw bestError(errs, tried);
+      if (left > MAX_HINT_MS) throw busyError(lastErr);
+      const w = Math.round(left + 150 + Math.random() * 700);
+      if (waited + w > MAX_WAIT_MS) throw busyError(lastErr);
+      waited += w;
+      notices += 1;
+      if (onNotice) onNotice({ attempt: notices, max: 4, waitMs: w, status: (lastErr && lastErr.status) || null });
+      await sleep(w, signal);
+      continue;
+    }
+
     try {
-      const res = await withBackoff(
-        () => attemptModel({ apiKey, model, task, system, parts, spec, maxOut, signal, onText: emit, onAlive: () => {}, firstMs, idleMs }),
-        { signal, onRetry: (x) => { tried.push(`${model} → ${x.status || "retry"}`); onNotice && onNotice(x); } },
-      );
-      return { ...res, model };
+      return await race(ready, hedge.filter((l) => pool.includes(l)));
     } catch (err) {
       if (!err || err.name === "AbortError" || signal.aborted) throw err || abortError();
-      tried.push(`${model} → ${err.status || (err.timeout ? "timeout" : err.emptyReply ? "empty" : "net")}${err.retired ? " (retired)" : ""}`);
-      errs.push(err);
-      if (err.fatal || err.blocked || err.busy) throw err;                        // bad key · safety filter · retries used up: stop, do not hop to other models
-      if (!err.dead) throw err;                                                    // not a dead model → not a reason to try another one
-      addDead(apiKey, model, !!err.retired);
-      if (err.retired) {
-        if (err.replacement) {
-          addSuggest(apiKey, err.replacement);
-          if (!order.includes(err.replacement) && !deadSet(apiKey).has(err.replacement)) order.splice(i + 1, 0, err.replacement);
-        }
-        selfHeal(apiKey);
-      }
+      if (err.fatal || err.blocked) throw err;
+      if (err.timeout && ++timeouts >= 2) throw busyError(err);                   // it hung twice: do not make the student wait a third time
+      if (!isTransient(err) && !err.dead && !err.ext && !err.cut && !err.tooBig) throw err;
+      if (starts >= MAX_STARTS) throw bestError(errs, tried);
+      /* otherwise: re-plan (the lane that failed is now asleep or dead) and go round again */
     }
   }
-  throw bestError(errs, tried);
 }
 
 

@@ -116,7 +116,7 @@ export function libraryContext({ questions, topics, query, focusId, focusTopicId
   const idx = buildIndex(questions || [], topics);
   if (!idx.N) return { text: "", codes: {}, used: [], count: 0 };
   const codes = {};
-  idx.items.forEach((it) => { codes[it.code] = { id: it.q.id, title: it.title }; });
+  idx.items.forEach((it) => { codes[it.code] = { id: it.q.id, title: it.title, kind: it.q.kind === "lesson" ? "lesson" : "question" }; });
 
   const ranked = rank(idx, query, focusId, focusTopicId);
   let chosen = ranked.filter((r) => r.s > 0.6 && r.it.q.id !== focusId).slice(0, maxItems).map((r) => r.it);
@@ -141,15 +141,65 @@ HOW TO USE THE LIBRARY: it is what he has ALREADY studied, so use it: connect hi
   return { text, codes, used: chosen.map((it) => it.q.id), count: idx.N };
 }
 
-/* the model's citations → { clean text, cited codes }. Works on any prefix of a streamed answer. */
+/* the model's citations → { clean text, cited codes, claims }. Works on any prefix of a streamed answer.
+   claims[code] = the sentence(s) of the answer that the citation stands under: it is what the saved item is searched for
+   when the student opens it from the answer (see bestField / lib/highlight.js). */
 export function splitCites(raw) {
   const cites = [];
-  let t = String(raw || "").replace(/\s?\[\s*(S\d+(?:\s*[,،;]\s*S\d+)*)\s*\]/g, (m, inner) => {
-    inner.split(/[,،;]/).forEach((c) => { const k = c.trim(); if (k && !cites.includes(k)) cites.push(k); });
+  const claims = {};
+  const src = String(raw || "");
+  let t = src.replace(/\s?\[\s*(S\d+(?:\s*[,،;]\s*S\d+)*)\s*\]/g, (m, inner, offset) => {
+    /* the sentence that ends right before the marker */
+    const before = src.slice(0, offset).replace(/\s?\[\s*S\d+(?:\s*[,،;]\s*S\d+)*\s*\]/g, "");
+    let start = 0;
+    for (const sep of ["\n", ". ", "؟", "? ", "! ", "。", "؛"]) start = Math.max(start, before.lastIndexOf(sep) + (sep.length > 1 && sep.trim() ? 1 : sep.length));
+    const claim = flat(before.slice(start)).slice(-320);
+    inner.split(/[,،;]/).forEach((c) => {
+      const k = c.trim();
+      if (!k) return;
+      if (!cites.includes(k)) cites.push(k);
+      if (claim && !(claims[k] || "").includes(claim)) claims[k] = `${claims[k] ? claims[k] + " " : ""}${claim}`.slice(-600);
+    });
     return "";
   });
   t = t.replace(/\s?\[\s*S?\d*(?:\s*[,،;]\s*S?\d*)*\s*$/, "");   // an unfinished "[S1" at the very end of the stream
-  return { text: t, cites };
+  return { text: t, cites, claims };
+}
+
+/* ── which part of a saved item answers a sentence? (used to highlight it when the student opens the item from a chat answer) ── */
+const FIELDS = ["original_question_text", "explanation", "tricks"];
+const lineScore = (claimTokens, text) => {
+  const lt = tokens(text);
+  if (!lt.length) return { hits: 0, score: 0 };
+  const set = new Set(lt);
+  let hits = 0;
+  for (const k of claimTokens) if (set.has(k)) hits += 1;
+  return { hits, score: (hits * hits) / (lt.length + 4) };
+};
+
+/* the field of the item (question text / explanation / tricks) whose lines match the sentence best, or null when nothing matches */
+export function bestField(q, claim) {
+  const ct = [...new Set(tokens(claim))];
+  if (!q || !ct.length) return null;
+  let best = null;
+  for (const f of FIELDS) {
+    for (const ln of String(q[f] || "").split("\n")) {
+      const { hits, score } = lineScore(ct, ln);
+      if (hits >= 2 || (hits >= 1 && ct.length <= 3)) { if (!best || score > best.score) best = { field: f, score, hits }; }
+    }
+  }
+  return best ? best.field : null;
+}
+
+/* the same scoring, for blocks of text already on the screen: indexes of the blocks to highlight (best one + close seconds, max 3) */
+export function bestBlocks(texts, claim) {
+  const ct = [...new Set(tokens(claim))];
+  if (!ct.length) return [];
+  const sc = texts.map((tx, i) => ({ i, ...lineScore(ct, tx) })).filter((r) => r.hits >= 2 || (r.hits >= 1 && ct.length <= 3));
+  if (!sc.length) return [];
+  sc.sort((a, b) => b.score - a.score);
+  const top = sc[0];
+  return sc.filter((r) => r.score >= top.score * 0.7).slice(0, 3).map((r) => r.i).sort((a, b) => a - b);
 }
 
 /* a few of the student's items as text, for building an exam from his own material */

@@ -13,7 +13,8 @@ import ImageGallery from "./components/ImageGallery.jsx";
 import { useBank } from "./lib/imagebank.js";
 import MoveModal from "./components/MoveModal.jsx";
 import { removeWord, vocabKey } from "./lib/vocab.js";
-import { applyOps, assignedSet, dropItem, moveItem, navFor, organize, renameTopic, dropTopic } from "./lib/topics.js";
+import { applyOps, assignedSet, dropItem, moveItem, navFor, organize, renameTopic, dropTopic, splitByKind, kindOf } from "./lib/topics.js";
+import { removeAllConvs } from "./lib/chathist.js";
 import { store, prefs } from "./lib/storage.js";
 import { ENV_KEY, warmUp, warmConnection } from "./lib/gemini.js";
 import { resizeDataUrl } from "./lib/image.js";
@@ -67,7 +68,12 @@ export default function App({ boot }) {
   const [apiKey, setApiKey] = useState(boot.apiKey || ENV_KEY);
   const [goal, setGoal] = useState(boot.goal);
   const [perf, setPerf] = useState(boot.perf);
-  const [topics, setTopics] = useState(boot.topics);
+  /* v3.25: questions and explanations have their own topics. Topics saved by an older version are sorted by kind once (a mixed topic is split in two). */
+  const [topics, setTopics] = useState(() => {
+    const t = splitByKind(boot.topics, boot.questions);
+    if (t !== boot.topics) store.set("nclex:topics", t);
+    return t;
+  });
   const [org, setOrg] = useState({ busy: false, done: 0, total: 0, err: "" });
   const [aiOpen, setAiOpen] = useState(false);
   const [aiEver, setAiEver] = useState(false);
@@ -106,14 +112,14 @@ export default function App({ boot }) {
   const validIds = () => new Set(qRef.current.map((q) => q.id));
 
   /* the AI puts every question / lesson that has no topic yet into one (existing or new) */
-  const runOrganize = async (full = false, manual = false) => {
+  const runOrganize = async (full = false, manual = false, kind = null) => {   // kind: only the questions, or only the explanations (null = both)
     if (orgCtl.current) return;
     if (!keyRef.current) { if (manual) setShowKey(true); return; }
     let st = tRef.current;
-    if (full) st = commitTopics((cur) => applyOps(cur, [{ type: "reset" }], validIds()));
+    if (full) st = commitTopics((cur) => applyOps(cur, [{ type: "reset", kind }], validIds()));
     const done = assignedSet(st), pin = new Set(st.pinned);
-    const todo = qRef.current.filter((q) => !done.has(q.id) && !pin.has(q.id) && (manual || !tried.current.has(q.id)));
-    if (!todo.length) { if (manual) say("كل أسئلتك متنظّمة ✅"); return; }
+    const todo = qRef.current.filter((q) => (!kind || kindOf(q) === kind) && !done.has(q.id) && !pin.has(q.id) && (manual || !tried.current.has(q.id)));
+    if (!todo.length) { if (manual) say(kind === "lesson" ? "كل شروحاتك متنظّمة ✅" : "كل أسئلتك متنظّمة ✅"); return; }
     const ctrl = new AbortController();
     orgCtl.current = ctrl;
     setOrg({ busy: true, done: 0, total: todo.length, err: "" });
@@ -124,7 +130,7 @@ export default function App({ boot }) {
         onProgress: (d, t) => setOrg((o) => ({ ...o, done: d, total: t })),
       });
       todo.forEach((q) => tried.current.add(q.id));
-      if (manual) say("اتنظّمت الأسئلة في مواضيع ✅");
+      if (manual) say(kind === "lesson" ? "اتنظّمت الشروحات في مواضيع ✅" : kind === "question" ? "اتنظّمت الأسئلة في مواضيع ✅" : "اتنظّم كل حاجة في مواضيع ✅");
       setOrg({ busy: false, done: 0, total: 0, err: "" });
     } catch (e) {
       if (e && e.name === "AbortError") setOrg({ busy: false, done: 0, total: 0, err: "" });
@@ -188,6 +194,15 @@ export default function App({ boot }) {
     return () => window.removeEventListener("nclex:speech-error", h);
   }, []);
   useEffect(() => { stopSpeaking(); }, [view]);
+
+  /* a chat answer opened a saved item with a part to highlight: once the editor has shown it, the highlight is dropped from the history entry
+     (going back to this screen later does not flash it again) */
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const consumeHl = useCallback(() => {
+    const v = viewRef.current;
+    if (v && v.hl) window.history.replaceState({ v: { ...v, hl: null } }, "");
+  }, []);
 
   const go = (v, replace = false) => {
     if (replace) window.history.replaceState({ v }, "");
@@ -270,7 +285,7 @@ export default function App({ boot }) {
     qRef.current = nextQ; wRef.current = nextW;
     setQuestions(nextQ); setWords(nextW);
     commitTopics((cur) => dropItem(cur, id));
-    await Promise.all([store.set("nclex:questions", nextQ), store.set("nclex:words", nextW), store.del(`nclex:img:${id}`), store.del(`nclex:chat:${id}`)]);
+    await Promise.all([store.set("nclex:questions", nextQ), store.set("nclex:words", nextW), store.del(`nclex:img:${id}`), removeAllConvs(`nclex:chat:${id}`)]);
     say("اتحذف السؤال");
     back();
   };
@@ -293,12 +308,12 @@ export default function App({ boot }) {
     say("اتمسحت الكلمات القديمة");
   };
 
-  const openItem = (id, replace) => go({ name: "edit", id }, !!replace);
+  const openItem = (id, replace, hl) => go({ name: "edit", id, ...(hl && hl.text ? { hl } : {}) }, !!replace);
   const openAI = (cmd) => {
     setAiEver(true); setAiOpen(true);
     if (cmd) setAiCmd({ ...cmd, id: Date.now() });
   };
-  const moveTo = (qid, target) => { commitTopics((cur) => moveItem(cur, qid, target)); setMoveFor(null); say(target ? "اتنقل للموضوع ✅" : "اتشال من الموضوع"); };
+  const moveTo = (qid, target) => { commitTopics((cur) => moveItem(cur, qid, target, kindOf(qRef.current.find((q) => q.id === qid)))); setMoveFor(null); say(target ? "اتنقل للموضوع ✅" : "اتشال من الموضوع"); };
   const topicView = view.name === "topic" ? topics.list.find((t) => t.id === view.id) : null;
   const libraryObj = { questions, topics };
   const moveQ = moveFor ? questions.find((q) => q.id === moveFor) : null;
@@ -340,7 +355,7 @@ export default function App({ boot }) {
           <Home questions={questions} words={words} goal={goal} onGoal={cycleGoal}
             onAdd={() => go({ name: "edit", kind: "question" })} onAddLesson={() => go({ name: "edit", kind: "lesson" })} onWords={() => go({ name: "words" })}
             onOpen={(id) => go({ name: "edit", id })}
-            topics={topics} org={org} onOrganize={(full) => runOrganize(full, true)} onAuto={(v) => commitTopics((c) => ({ ...c, auto: v }))}
+            topics={topics} org={org} onOrganize={(full, kind) => runOrganize(full, true, kind)} onAuto={(v) => commitTopics((c) => ({ ...c, auto: v }))}
             onOpenTopic={(id) => go({ name: "topic", id })} />
         ) : view.name === "topic" ? (
           topicView ? (
@@ -358,7 +373,8 @@ export default function App({ boot }) {
           <Editor key={`${view.id || "new"}-${view.kind || ""}`} initial={editing} kind={view.kind} history={historyFor(questions, view.id)} boot={boot} apiKey={apiKey} perf={perf} onLearn={onLearn}
             onNeedKey={() => setShowKey(true)} onSave={saveQuestion} onDelete={deleteQuestion}
             nav={view.id ? navFor(topics, questions, view.id) : null} onNavTo={(id) => go({ name: "edit", id }, true)}
-            onOpenTopic={(id) => go({ name: "topic", id })} onMove={setMoveFor} library={libraryObj} onOpenItem={openItem} />
+            onOpenTopic={(id) => go({ name: "topic", id })} onMove={setMoveFor} library={libraryObj} onOpenItem={openItem}
+            highlight={view.hl || null} onHighlightShown={consumeHl} />
         )}
       </main>
 
@@ -367,7 +383,7 @@ export default function App({ boot }) {
           ctx={AI_CTX} chipIds={[]} storeKey="nclex:chat:global" command={aiCmd} onOpenItem={openItem}
           library={{ questions, topics, focusId: view.name === "edit" ? view.id : null, focusTopicId: view.name === "topic" ? view.id : null }} />
       )}
-      {moveQ && <MoveModal title={moveQ.title} topics={topics} currentId={(topics.list.find((t) => t.qids.includes(moveQ.id)) || {}).id} onPick={(t) => moveTo(moveQ.id, t)} onClose={() => setMoveFor(null)} />}
+      {moveQ && <MoveModal title={moveQ.title} topics={{ ...topics, list: topics.list.filter((t) => t.kind === kindOf(moveQ)) }} kind={kindOf(moveQ)} currentId={(topics.list.find((t) => t.qids.includes(moveQ.id)) || {}).id} onPick={(t) => moveTo(moveQ.id, t)} onClose={() => setMoveFor(null)} />}
       <WordPop />
       {showBackup && <BackupModal onClose={() => setShowBackup(false)} />}
       {showKey && <KeyModal current={apiKey === ENV_KEY ? "" : apiKey} hasEnv={!!ENV_KEY} onSave={saveKey} onClose={() => setShowKey(false)} />}

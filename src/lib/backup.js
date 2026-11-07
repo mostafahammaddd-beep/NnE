@@ -2,15 +2,16 @@
    Everything lives on this device only (IndexedDB). One tap saves it all to a JSON file; one tap brings it back.
    The API key is NEVER included. */
 import { store } from "./storage.js";
+import { convKeys } from "./chathist.js";
 
 const BASE = ["nclex:questions", "nclex:words", "nclex:mode", "nclex:goal", "nclex:topics", "nclex:vocab", "nclex:chat:global"];
 
 export async function buildBackup() {
   const data = {};
-  for (const k of BASE) { const v = await store.get(k); if (v !== null) data[k] = v; }
+  for (const k of [...BASE, ...(await convKeys("nclex:chat:global"))]) { const v = await store.get(k); if (v !== null) data[k] = v; }
   const qs = Array.isArray(data["nclex:questions"]) ? data["nclex:questions"] : [];
   for (const q of qs) {
-    for (const k of [`nclex:img:${q.id}`, `nclex:chat:${q.id}`]) { const v = await store.get(k); if (v !== null) data[k] = v; }
+    for (const k of [`nclex:img:${q.id}`, `nclex:chat:${q.id}`, ...(await convKeys(`nclex:chat:${q.id}`))]) { const v = await store.get(k); if (v !== null) data[k] = v; }
   }
   return { app: "nclex-rn", version: 1, savedAt: Date.now(), count: qs.length, data };
 }
@@ -48,6 +49,12 @@ export async function restoreBackup(file) {
     if (k === "nclex:vocab") { await store.set(k, { ...(v || {}), ...((await store.get(k)) || {}) }); continue; }
     if (k === "nclex:words") { const w = (await store.get(k)) || []; const ids = new Set(w.map((x) => x.id || x.qid)); await store.set(k, [...w, ...(v || []).filter((x) => !ids.has(x.id || x.qid))]); continue; }
     if (k === "nclex:topics") { if (!(await store.get(k))) await store.set(k, v); continue; }
+    if (k.startsWith("nclex:chat:") && k.endsWith(":idx")) {   // the list of conversations of a chat: merged by id, never replaced
+      const have = (await store.get(k)) || [];
+      const ids = new Set(have.map((e) => e.id));
+      await store.set(k, [...have, ...(Array.isArray(v) ? v : []).filter((e) => e && !ids.has(e.id))]);
+      continue;
+    }
     if (k.startsWith("nclex:img:") || k.startsWith("nclex:chat:")) { if ((await store.get(k)) === null) await store.set(k, v); continue; }
     if ((await store.get(k)) === null) await store.set(k, v);
   }

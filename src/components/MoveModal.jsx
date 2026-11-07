@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import Icon from "./Icon.jsx";
 
 /* "Put this question / lesson in another topic" — by hand. A hand-made choice is pinned: the AI never moves it again. */
-export default function MoveModal({ title, topics, currentId, onPick, onClose }) {
+export default function MoveModal({ title, topics, currentId, onPick, onClose, kind = "question" }) {
   const [name, setName] = useState("");
   const list = [...topics.list].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
   return (
@@ -10,7 +10,7 @@ export default function MoveModal({ title, topics, currentId, onPick, onClose })
       <div className="card modal move-modal" role="dialog" aria-modal="true" aria-label="نقل لموضوع" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <span className="modal-ico" style={{ background: "var(--teal-soft)", color: "var(--teal)" }}><Icon name="folder" size={22} /></span>
-          <h2>نقل لموضوع</h2>
+          <h2>{kind === "lesson" ? "نقل لموضوع (الشروحات)" : "نقل لموضوع (الأسئلة)"}</h2>
         </div>
         <p className="move-sub" dir="auto">{title}</p>
         <div className="move-list">

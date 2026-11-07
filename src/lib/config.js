@@ -5,12 +5,18 @@
    (or in the GitHub workflow env next to VITE_GEMINI_API_KEY) and rebuild. Same for the strong "deep" model: VITE_GEMINI_MODEL_PRO.
    If Google says a model is retired / unavailable for your key, the app drops it and moves to the "-latest" aliases by itself. */
 const ENV = (typeof import.meta !== "undefined" && import.meta.env) || {};
-export const MODEL_FAST = String(ENV.VITE_GEMINI_MODEL || "gemini-2.5-flash").trim();
+export const MODEL_FAST = String(ENV.VITE_GEMINI_MODEL || "gemini-flash-latest").trim();
 /* How the lesson (explanation + traps) is produced — VITE_LESSON_MODE in .env:
    "fast"   (default) silent solve → part A ∥ part B-main ∥ part B-traps: three SHORT streams at the same time. Fastest. 6 requests per analysis.
    "split"  part A ∥ part B (B solves by itself, which makes it the slow one). 4 requests per analysis.
    "single" ONE long request. 3 requests per analysis but 2+ minutes of waiting. */
 export const LESSON_MODE = ["fast", "split", "single"].includes(String(ENV.VITE_LESSON_MODE)) ? String(ENV.VITE_LESSON_MODE) : "fast";
+/* "Explained from zero" for LONG study material is written in parallel slices (lib/lessonflow.js): a short plan splits the material into topics, then up to
+   VITE_LESSON_SLICES tutors write their topics at the same moment (same prompts, same depth). 0 = off (the old three-part flow). Default 3.
+   More slices = faster on very long material, but one more request per slice (the free daily quota is counted per request). */
+export const LESSON_SLICES = (() => { const n = parseInt(String(ENV.VITE_LESSON_SLICES ?? "3"), 10); return Number.isFinite(n) ? Math.min(5, Math.max(0, n)) : 3; })();
+/* material smaller than this (about N pages) keeps the old flow: it is already quick, and fewer requests are kept for the quota */
+export const SLICE_MIN_PAGES = (() => { const n = parseFloat(String(ENV.VITE_SLICE_MIN_PAGES ?? "5")); return Number.isFinite(n) ? Math.max(1, n) : 5; })();
 export const MODEL_PRO = String(ENV.VITE_GEMINI_MODEL_PRO || "gemini-pro-latest").trim();
 
 export const CHIPS = [

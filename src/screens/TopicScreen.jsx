@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import Icon from "../components/Icon.jsx";
 import { ConfirmButton } from "../components/ui.jsx";
+import FontSizer from "../components/FontSizer.jsx";
+import { useTextScale, scaleStyle } from "../lib/textscale.js";
 import { RichText, WordList } from "../components/rich.jsx";
 import { orderTopicItems, topicSig, topicOverview } from "../lib/topics.js";
 import { itemsFromSaved } from "../lib/docs.js";
@@ -12,8 +14,9 @@ import { stampShort } from "../lib/time.js";
 const fmtDate = (ts) => { try { return new Date(ts).toLocaleDateString("ar-EG", { day: "numeric", month: "short" }); } catch (e) { return ""; } };
 
 /* a collapsible card, same look as the result sections of a question */
-function Section({ cls, icon, title, sub, defaultOpen = true, tools, children, onOpen }) {
+function Section({ cls, icon, title, sub, defaultOpen = true, tools, children, onOpen, scaleId }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [ts] = useTextScale(scaleId);   // this section's own text size only
   useEffect(() => { if (open && onOpen) onOpen(); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <section className={`sec ${cls}`} data-open={open}>
@@ -22,12 +25,13 @@ function Section({ cls, icon, title, sub, defaultOpen = true, tools, children, o
           <span className="sec-ico"><Icon name={icon} size={21} /></span>
           <span className="sec-title"><h3>{title}</h3>{sub && <p>{sub}</p>}</span>
         </button>
+        {open && scaleId && <div className="sec-tools"><FontSizer id={scaleId} label={`حجم خط ${title}`} /></div>}
         {open && tools}
         <button type="button" className="sec-chev" aria-expanded={open} aria-label={open ? `اقفل ${title}` : `افتح ${title}`} onClick={() => setOpen((o) => !o)}>
           <Icon name="chevron" size={20} />
         </button>
       </header>
-      {open && <div className="sec-body">{children}</div>}
+      {open && <div className="sec-body ts-box" style={scaleStyle(ts)}>{children}</div>}
     </section>
   );
 }
@@ -156,7 +160,7 @@ export default function TopicScreen({ topic, questions, apiKey, onNeedKey, onOpe
           )}
           {topic.summary && <p className="topic-sum" dir="auto">{topic.summary}</p>}
           <div className="pills">
-            <span className="pill"><Icon name="fileText" size={14} /> <b>{exams.length}</b> أسئلة</span>
+            {exams.length > 0 && <span className="pill"><Icon name="fileText" size={14} /> <b>{exams.length}</b> أسئلة</span>}
             {lessons.length > 0 && <span className="pill pill-lesson"><Icon name="bookOpen" size={14} /> <b>{lessons.length}</b> شرح</span>}
             <span className="pill pill-violet"><Icon name="library" size={14} /> <b>{wordCount}</b> كلمة</span>
           </div>
@@ -169,7 +173,7 @@ export default function TopicScreen({ topic, questions, apiKey, onNeedKey, onOpe
       </section>
 
       <div className="results topic-results">
-        <Section cls="sec-teal" icon="brain" title="شرح الموضوع" sub="كل اللي ذاكرته في الموضوع ده، مترابط في مكان واحد"
+        <Section scaleId="topic:overview" cls="sec-teal" icon="brain" title="شرح الموضوع" sub="كل اللي ذاكرته في الموضوع ده، مترابط في مكان واحد"
           tools={shown && !busy ? <div className="sec-tools"><button type="button" className="iconbtn" onClick={makeOverview} aria-label="حدّث الشرح" title="حدّث الشرح"><Icon name="refresh" size={16} /></button></div> : null}>
           {busy && !shown && <p className="topic-muted"><span className="live" style={{ margin: 0 }}><i /><i /><i /></span> بيقرا الأسئلة والشروحات ويجمّعها…</p>}
           {shown ? <RichText text={shown} /> : !busy && (
@@ -188,13 +192,13 @@ export default function TopicScreen({ topic, questions, apiKey, onNeedKey, onOpe
         </Section>
 
         {lessons.length > 0 && (
-          <Section cls="sec-sky" icon="bookOpen" title="الشروحات والمواد" sub={`${lessons.length} ${lessons.length > 2 ? "مواد" : "مادة"} اتشرحت`}>
+          <Section scaleId="topic:lessons" cls="sec-sky" icon="bookOpen" title="الشروحات والمواد" sub={`${lessons.length} ${lessons.length > 2 ? "مواد" : "مادة"} اتشرحت`}>
             <div className="trows">{lessons.map((q, i) => <Row key={q.id} q={q} n={i + 1} />)}</div>
           </Section>
         )}
 
         {exams.length > 0 && (
-          <Section cls="sec-violet" icon="fileText" title="الأسئلة" sub={`${exams.length} ${exams.length > 10 ? "سؤال" : "أسئلة"} في الموضوع`}>
+          <Section scaleId="topic:exams" cls="sec-violet" icon="fileText" title="الأسئلة" sub={`${exams.length} ${exams.length > 10 ? "سؤال" : "أسئلة"} في الموضوع`}>
             <div className="trows">{exams.map((q, i) => <Row key={q.id} q={q} n={i + 1} />)}</div>
           </Section>
         )}
@@ -204,7 +208,7 @@ export default function TopicScreen({ topic, questions, apiKey, onNeedKey, onOpe
         </Section>
 
         {wordCount > 0 && (
-          <Section cls="sec-violet" icon="library" title="كلمات الموضوع" sub={`${wordCount} كلمة من كل الأسئلة، من غير تكرار`} defaultOpen={false}>
+          <Section scaleId="topic:words" cls="sec-violet" icon="library" title="كلمات الموضوع" sub={`${wordCount} كلمة من كل الأسئلة، من غير تكرار`} defaultOpen={false}>
             <WordList text={words} showCount={false} />
           </Section>
         )}

@@ -45,8 +45,8 @@ export function buildWordsPrompt(chipIds, kind = "question") {
     ? "the meaning in simple English (B1 words, max 10 words)"
     : "المعنى بالعربي (بسيط وواضح ومناسب لسياق التمريض والسؤال)";
   const sample = english
-    ? "edema — swelling caused by extra fluid in the body tissues\nPRN — as needed (when the patient needs it)\nprioritize — decide what must be done first\nadverse — harmful and not wanted\nrequires further teaching — the patient did not understand and needs more explanation"
-    : "edema — وذمة (تورّم بسبب تجمّع سوائل زيادة في الأنسجة)\nPRN — عند الحاجة (حسب طلب المريض)\nprioritize — يحدّد الأولوية (إيه اللي يتعمل الأول)\nadverse — ضارّ وغير مرغوب\nrequires further teaching — محتاج شرح أكتر (المريض مفهمش كويس)";
+    ? "[MED] edema — swelling caused by extra fluid in the body tissues\n[ABBR] PRN — as needed (when the patient needs it)\n[B2] prioritize — decide what must be done first\n[B2] adverse — harmful and not wanted\n[B2] requires further teaching — the patient did not understand and needs more explanation\n[C1] exacerbation — a sudden worsening of a disease"
+    : "[MED] edema — وذمة (تورّم بسبب تجمّع سوائل زيادة في الأنسجة)\n[ABBR] PRN — عند الحاجة (حسب طلب المريض)\n[B2] prioritize — يحدّد الأولوية (إيه اللي يتعمل الأول)\n[B2] adverse — ضارّ وغير مرغوب\n[B2] requires further teaching — محتاج شرح أكتر (المريض مفهمش كويس)\n[C1] exacerbation — تفاقم مفاجئ في المرض";
   const out = {
     system: `You are a vocabulary coach for an Arabic-speaking nursing student whose English level is B1 (intermediate). He is preparing for the NCLEX-RN, which is 100% in English.
 
@@ -66,8 +66,15 @@ EXCLUDE (never list): every A1, A2 and B1 word, and every everyday word, even if
 
 HOW TO WORK: go through the text sentence by sentence, then option by option, in reading order, so nothing is skipped. Write every entry once (no duplicates) and keep the exact form used in the question (e.g. "edematous"). Give the meaning that fits THIS question.
 
+LEVEL TAG (mandatory, it is how the app checks you): start EVERY line with the CEFR level of the entry in square brackets, decided from the Oxford 3000 / 5000 / English Vocabulary Profile, never from how the word feels:
+[B2]  [C1]  [C2]  = a general English word or phrase of that level
+[MED]  = a medical / nursing / anatomy / drug / lab term a layperson would not know
+[ABBR] = an abbreviation or symbol
+The app throws away every line tagged A1, A2 or B1, and every line whose words are all everyday English, so never write such a line: if you are about to write [B1] or lower, skip that word. Never tag a plain everyday word [MED] to keep it in.
+Before you write each general word ask yourself: "is this in the Oxford 3000 at A1, A2 or B1?" If yes, or if you are not sure, skip it.
+
 OUTPUT: one entry per line and NOTHING else (no numbering, no bullets, no headings, no JSON, no markdown, no intro sentence).
-Format: Term — ${meaning}
+Format: [TAG] Term — ${meaning}
 Optionally add a second " — " followed by a tiny hint (max 6 words) when the word has a second meaning or is easily confused with another word.
 Example lines:
 ${sample}`,
@@ -530,3 +537,134 @@ ${styleTail(chips, extra)}${linkBlock(history, "material")}${ARABIC_RULE}Start d
     user: "Write the whole lesson for the study material.",
   };
 }
+
+/* ───────────── STUDY MATERIAL, SLICED (v3.24) ─────────────
+   For long material the lesson is no longer one long answer. The SAME instructions (STUDENT / TEACH / QUALITY / LAYOUT, same sections, same depth)
+   are given to several tutors who each write ONE slice of it at the same moment, so the student waits for one short slice, not for the whole lesson.
+     head  = plan (a list of topics, machine-read) + the big idea + the English from the material
+     slice = "explained from zero" + "must memorize" for the topics of that slice only
+     tail  = how it appears on the exam + the memory sentences + the traps
+   lib/lessonflow.js puts the pieces back in the order of the normal lesson. */
+
+export const studyHeadings = (chips) => studyH(chips);
+
+const wordsFor = (n, min) => Math.max(min, Math.round(n));
+
+/* part 1 · the plan (first thing in the answer) + big idea + English */
+export function buildStudyHeadPrompt({ history, extra, chips, words }) {
+  const H = studyH(chips);
+  return {
+    system: `You are an elite NCLEX-RN educator and clinical-reasoning coach, acting as a patient private tutor.
+
+${STUDENT}
+
+${MATERIAL}
+You write the FIRST PART of a lesson. Other tutors write the topics, the exam part and the traps at the same moment from the same material. Do NOT write those.
+
+${TEACH}
+
+${QUALITY}
+
+OUTPUT FORMAT — plain text, no code fences, no JSON. Your answer has TWO steps, in this order.
+
+STEP 1 — THE PLAN (read by the app, not shown to the student). Output it FIRST, immediately, before anything else:
+===PLAN===
+N | English topic title | weight | where it is in the material
+===END===
+One line per topic, in the order of the material. weight: 1 = a short or simple topic, 2 = a normal topic, 3 = a long or dense topic. "where" = a few words (page numbers, slide numbers, a heading or the file name). Rules: 3 to 14 topics; every part of the material belongs to exactly one topic (no gaps, no overlaps); each topic is something that can be taught on its own; if the student's note limits the scope, plan ONLY the part that is in scope.
+
+STEP 2 — THE TEXT. Right after ===END=== write ONLY the two sections below.
+${LAYOUT}
+
+SECTIONS — exactly these headings, in this order:
+${H.big}
+- 2 to 4 bullets: what the material is about and why it matters for the NCLEX; key English terms in **bold**.
+${H.english}
+- 6 to 12 bullets: an important English phrase or sentence pattern that the material uses — **the phrase** — its meaning, and when the exam uses it.
+
+Length: aim for about ${words} words for the two sections together. Never pad.
+${styleTail(chips, extra)}${linkBlock(history, "material")}${ARABIC_RULE}Start directly with ===PLAN===.`,
+    user: "Plan the study material and write the first part of the lesson.",
+  };
+}
+
+/* part 2 · one slice: the topics assigned to this tutor, explained from zero + their must-memorize checklist */
+export function buildStudySlicePrompt({ history, extra, chips, topics, all, words, mustWords, single }) {
+  const list = all.map((t) => `${t.n}. ${t.title}${t.where ? ` — ${t.where}` : ""}`).join("\n");
+  const mine = topics.map((t) => `${t.n}. ${t.title}${t.where ? ` — ${t.where}` : ""}`).join("\n");
+  const scope = single
+    ? "You write ALL the topics of the material."
+    : `The material is divided into these topics:\n${list}\n\nOther tutors write the other topics at the same moment (and the big idea, the English phrases, the exam part, the memory sentences and the traps). YOU WRITE ONLY THESE TOPICS:\n${mine}\nDo NOT write about any other topic, do NOT repeat or preview what others write, no introduction, no conclusion: start directly with your first topic. The rest of the material is context only. Write each of your topics at the full depth you would give it if it were the only topic: never shorten it because others write the rest.`;
+  return {
+    system: `You are an elite NCLEX-RN educator and clinical-reasoning coach, acting as a patient private tutor.
+
+${STUDENT}
+
+${MATERIAL}
+YOU WRITE ONE SLICE OF THE LESSON.
+${scope}
+
+${TEACH}
+
+${QUALITY}
+
+OUTPUT FORMAT — plain text, exactly two parts separated by marker lines, nothing before the first marker, no code fences, no JSON, NO headings of your own (the app adds the section headings):
+===BASICS===
+(the explanation from zero)
+===MUST===
+(the must-memorize checklist)
+
+${LAYOUT}
+
+===BASICS=== — go through your topics in THEIR OWN ORDER, topic by topic. For each topic: **Term** — a simple English definition (A2 words); then 1 to 3 lines that explain it from zero with an everyday analogy; then WHY it happens inside the body (2 to 3 simple cause → effect lines); then the key facts (signs and symptoms, causes, normal ranges, drugs, nursing actions) — each fact on its own line, English first. If the material has tables, lists or numbers in your topics, keep every number exactly and explain what it means in practice.
+===MUST=== — a compact checklist of everything worth memorizing from YOUR topics (ranges, signs, drugs and antidotes, actions, priorities): one fact per line, a "- " bullet, **English term** first, then its meaning.
+
+Length: aim for about ${words} words in ===BASICS=== and about ${mustWords} words in ===MUST=== — as deep as the quality bar requires, never padded. Skip nothing important, but never pad.
+${styleTail(chips, extra)}${linkBlock(history, "material")}${ARABIC_RULE}Start directly with ===BASICS===.`,
+    user: single ? "Write the lesson topics for the study material." : "Write your slice of the lesson for the study material.",
+  };
+}
+
+/* part 3 · how it appears on the exam + memory sentences + traps */
+export function buildStudyTailPrompt({ history, extra, chips, words }) {
+  const H = studyH(chips);
+  return {
+    system: `You are an elite NCLEX-RN educator and clinical-reasoning coach, acting as a patient private tutor.
+
+${STUDENT}
+
+${MATERIAL}
+YOU WRITE THE LAST PART OF A LESSON. Other tutors write the big idea, the topics explained from zero and the must-memorize checklist at the same moment. Do NOT write or repeat those: write ONLY the sections below.
+
+${TEACH}
+
+${QUALITY}
+
+OUTPUT FORMAT — plain text, exactly three parts separated by marker lines, nothing before the first marker, no code fences, no JSON:
+===EXAM===
+(how it appears on the exam)
+===MEMO===
+(the English sentences to memorize)
+===TRICKS===
+(the traps)
+
+${LAYOUT}
+
+===EXAM=== — use exactly this heading and structure:
+${H.exam}
+- 3 to 6 bullets: how the NCLEX tests this content (question types: priority, delegation, safety, pharmacology, SATA, lab values, Next-Gen …) and what the examiner wants.
+1. 3 to 5 numbered steps: a small decision framework (ABCs, Maslow, assess before you intervene, safety first, scope of practice, acute before chronic …) applied to THIS content.
+===MEMO=== — use exactly this heading and structure:
+${H.memo}
+> 3 to 5 short English sentences that sum up the key rules (one per line, each starting with "> "), each followed by its translation on the next line (a normal line, no marker).
+===TRICKS===
+- 3 to 5 bullets, each like "**Trap name:** short explanation" — look-alike terms, tempting wrong choices, common student mistakes, exceptions. Trap names are in English.
+- The last line: "💡 " followed by one short memory tip (a mnemonic or a rhyme) in English with its translation.
+
+Length: aim for about ${words} words in total — as deep as the quality bar requires, never padded.
+${styleTail(chips, extra)}${linkBlock(history, "material")}${ARABIC_RULE}Start directly with ===EXAM===.`,
+    user: "Write the exam part, the memory sentences and the traps for the study material.",
+  };
+}
+
+export { wordsFor as _wordsFor };
