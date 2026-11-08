@@ -7,6 +7,7 @@ import { assignedSet, topicOf, kindOf } from "../lib/topics.js";
 import { prefs } from "../lib/storage.js";
 import { stampShort } from "../lib/time.js";
 import { useVocab, savedCount } from "../lib/vocab.js";
+import { useMistakes, summarize } from "../lib/mistakes.js";
 
 const fmtDate = (ts) => {
   try { return new Date(ts).toLocaleDateString("ar-EG", { day: "numeric", month: "short" }); }
@@ -45,9 +46,11 @@ function QCard({ q, onOpen, topic }) {
   );
 }
 
-export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesson, onWords, onOpen, topics, org, onOrganize, onAuto, onOpenTopic, onMove }) {
+export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesson, onWords, onOpen, topics, org, onOrganize, onAuto, onOpenTopic, onMove, onMistakes }) {
   const sorted = useMemo(() => [...questions].sort((a, b) => b.updatedAt - a.updatedAt), [questions]);
   const { map: vmap } = useVocab();
+  const { list: mlist } = useMistakes();
+  const msum = useMemo(() => summarize(mlist), [mlist]);
   const wordCount = useMemo(() => savedCount(vmap), [vmap]);
   const veryN = useMemo(() => Object.values(vmap).filter((e) => e.level === 2).length, [vmap]);
   const stats = useMemo(() => studyStats(questions, goal), [questions, goal]);
@@ -63,8 +66,8 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesso
   const assigned = useMemo(() => assignedSet(topics), [topics]);
   const pinned = useMemo(() => new Set(topics.pinned), [topics.pinned]);
   /* v3.25: two sections, each with its own topics: الأسئلة (exam questions) and الشروحات (lessons / study material) */
-  const [kindTab, setKindTab] = useState(() => (prefs.get("nclex:home:kind", "") === "lesson" ? "lesson" : "question"));
-  const pickKind = (k) => { setKindTab(k); prefs.set("nclex:home:kind", k); };
+  const [kindTab, setKindTab] = useState(() => (prefs.get("clinix:home:kind", "") === "lesson" ? "lesson" : "question"));
+  const pickKind = (k) => { setKindTab(k); prefs.set("clinix:home:kind", k); };
   const nQ = useMemo(() => questions.filter((q) => kindOf(q) === "question").length, [questions]);
   const nL = questions.length - nQ;
   const kindItems = useMemo(() => sorted.filter((q) => kindOf(q) === kindTab), [sorted, kindTab]);
@@ -73,9 +76,9 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesso
   const waiting = useMemo(() => loose.filter((q) => !pinned.has(q.id)), [loose, pinned]);
   const topicList = useMemo(() => topics.list.filter((t) => t.kind === kindTab).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)), [topics.list, kindTab]);
   const byId = useMemo(() => new Map(questions.map((q) => [q.id, q])), [questions]);
-  const [view, setView] = useState(() => prefs.get("nclex:home:view", "") || "");
+  const [view, setView] = useState(() => prefs.get("clinix:home:view", "") || "");
   const mode = view === "all" || view === "topics" ? view : (topicList.length ? "topics" : "all");
-  const pickView = (v) => { setView(v); prefs.set("nclex:home:view", v); };
+  const pickView = (v) => { setView(v); prefs.set("clinix:home:view", v); };
   const [armed, setArmed] = useState(false);
   useEffect(() => { if (!armed) return undefined; const t = setTimeout(() => setArmed(false), 3000); return () => clearTimeout(t); }, [armed]);
   const organizeClick = () => {
@@ -151,6 +154,13 @@ export default function Home({ questions, words, goal, onGoal, onAdd, onAddLesso
             <span className="sub">ارفع كتاب أو ملفات أو صور أو الصق نص، ويشرحه لك من الصفر</span>
           </span>
           <span className="cta-ico"><Icon name="bookOpen" size={26} /></span>
+        </button>
+        <button onClick={onMistakes} className="cta cta-alt cta-mist">
+          <span>
+            <b>غلطاتي</b>
+            <span className="sub">{msum.total ? `${msum.open} محتاجة مراجعة · ${msum.done} متقنة${msum.weakest && msum.open ? ` · الأضعف: ${msum.weakest.name}` : ""}` : "أي سؤال تغلط فيه بيتحفظ هنا مترتّب حسب الموضوع"}</span>
+          </span>
+          <span className="cta-ico"><Icon name="bookX" size={26} /></span>
         </button>
         <button onClick={onWords} className="cta cta-alt">
           <span>

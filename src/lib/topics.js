@@ -49,6 +49,24 @@ export function splitByKind(state, questions) {
   return changed ? { ...state, list } : state;
 }
 
+/* backup restore: topics of a backup are MERGED into the current ones (never replace them, never leave restored questions without a topic).
+   A backup topic joins the current topic with the same id, or the same kind + name; otherwise it is added. An item already placed stays where it is. */
+export function mergeTopics(cur, inc, validIds) {
+  const a = shapeTopics(cur), b = shapeTopics(inc);
+  const list = a.list.map((t) => ({ ...t, qids: [...t.qids] }));
+  const placed = new Set(list.flatMap((t) => t.qids));
+  for (const t of b.list) {
+    const qids = t.qids.filter((id) => (!validIds || validIds.has(id)) && !placed.has(id));
+    if (!qids.length) continue;
+    const nm = flat(t.name).toLowerCase();
+    const twin = list.find((x) => x.id === t.id) || list.find((x) => x.kind === t.kind && flat(x.name).toLowerCase() === nm);
+    if (twin) { twin.qids.push(...qids); twin.updatedAt = Date.now(); } else list.push({ ...t, qids });
+    qids.forEach((id) => placed.add(id));
+  }
+  const pinned = [...new Set([...a.pinned, ...b.pinned.filter((id) => !validIds || validIds.has(id))])];
+  return { list, pinned, auto: a.auto };
+}
+
 export const topicOf = (topics, qid) => (topics.list || []).find((t) => t.qids.includes(qid)) || null;
 export const assignedSet = (topics) => new Set((topics.list || []).flatMap((t) => t.qids));
 

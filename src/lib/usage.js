@@ -3,8 +3,8 @@
    to the Gemini API, hedged duplicates included — Google counts those too). The daily quota resets at midnight
    Pacific time. When Google answers "quota exceeded … limit: N" the real limit N is learned and remembered. */
 
-const LS = "nclex:usage:v1";
-const LS_LIMIT = "nclex:usage:limit";
+const LS = "clinix:usage:v1";
+const LS_LIMIT = "clinix:usage:limit";
 export const DEFAULT_LIMIT = 250;
 const TZ = "America/Los_Angeles";
 
@@ -30,7 +30,7 @@ function load() {
 }
 function save(u) {
   try { window.localStorage.setItem(LS, JSON.stringify(u)); } catch (e) { /* ignore */ }
-  try { window.dispatchEvent(new Event("nclex-usage")); } catch (e) { /* ignore */ }
+  try { window.dispatchEvent(new Event("clinix-usage")); } catch (e) { /* ignore */ }
 }
 
 export const readUsage = () => load();
@@ -65,7 +65,7 @@ export function setLimit(n) {
 
 /* Each API key has its own quota. When a DIFFERENT key becomes the active one, the old key's counter and the limit
    learned from it are deleted and counting starts again from 0 for the new key. Same key again → nothing changes. */
-const LS_KEY = "nclex:usage:key";
+const LS_KEY = "clinix:usage:key";
 const tagOf = (k) => { const t = String(k || "").trim(); return t ? `${t.length}:${t.slice(-10)}` : ""; };
 export function syncUsageKey(apiKey) {
   const tag = tagOf(apiKey);
@@ -77,6 +77,6 @@ export function syncUsageKey(apiKey) {
     window.localStorage.setItem(LS_KEY, tag);
     if (old !== null) { window.localStorage.removeItem(LS); window.localStorage.removeItem(LS_LIMIT); }   // first run: keep what was counted so far
   } catch (e) { /* ignore */ }
-  try { window.dispatchEvent(new Event("nclex-usage")); } catch (e) { /* ignore */ }
+  try { window.dispatchEvent(new Event("clinix-usage")); } catch (e) { /* ignore */ }
   return old !== null;
 }

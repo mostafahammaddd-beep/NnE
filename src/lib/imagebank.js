@@ -7,9 +7,9 @@
 import { useEffect, useState } from "react";
 import { store } from "./storage.js";
 
-const IDX = "nclex:imgbank:index";
-const IMG = (id) => `nclex:imgbank:img:${id}`;
-const EVT = "nclex:imgbank";
+const IDX = "clinix:imgbank:index";
+const IMG = (id) => `clinix:imgbank:img:${id}`;
+const EVT = "clinix:imgbank";
 export const GLOBAL_LESSON = "global";
 
 let cache = null;                 // the index, once loaded

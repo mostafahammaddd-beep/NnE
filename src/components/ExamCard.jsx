@@ -1,6 +1,7 @@
 import React from "react";
 import Icon from "./Icon.jsx";
 import { RichText } from "./rich.jsx";
+import { recordAnswer } from "../lib/mistakes.js";
 
 /* An interactive exam inside the chat. The whole state lives in `exam` (saved with the message), so closing the chat or the app
    never loses progress:  { title, intro, questions:[{type,stem,options,correct,rationale,topic}], answers:{ [i]:{sel:[],checked} }, cur, done } */
@@ -14,7 +15,7 @@ export function scoreOf(exam) {
   return exam.questions.reduce((n, q, i) => n + (isRight(q, ans[i]) ? 1 : 0), 0);
 }
 
-export default function ExamCard({ exam, onChange, onAsk, busy }) {
+export default function ExamCard({ exam, onChange, onAsk, busy, onOpenMistakes }) {
   const qs = exam.questions;
   const total = Math.max(exam.total || qs.length, qs.length);   // v3.20: questions arrive while the student is already answering
   const loading = !!exam.loading;
@@ -29,6 +30,12 @@ export default function ExamCard({ exam, onChange, onAsk, busy }) {
     if (a.checked) return;
     if (q.type === "multi") setAns(cur, { sel: a.sel.includes(i) ? a.sel.filter((x) => x !== i) : [...a.sel, i] });
     else setAns(cur, { sel: [i] });
+  };
+  /* confirming an answer: a wrong one is saved to «غلطاتي» automatically (a right one only counts when that question was a mistake before) */
+  const confirm = () => {
+    if (!a.sel.length || a.checked) return;
+    recordAnswer(q, a.sel, { exam: exam.title });
+    setAns(cur, { checked: true });
   };
   const askAbout = (idx) => {
     const k = qs[idx];
@@ -63,6 +70,7 @@ export default function ExamCard({ exam, onChange, onAsk, busy }) {
         </div>
         <div className="exam-actions">
           {wrong.length > 0 && <button type="button" className="btn btn-teal btn-sm" onClick={() => set({ done: false, cur: wrong[0].i })}>راجع الغلط ({wrong.length})</button>}
+          {wrong.length > 0 && onOpenMistakes && <button type="button" className="btn btn-ghost btn-sm" onClick={onOpenMistakes}><Icon name="circleX" size={15} /> افتح غلطاتي</button>}
           {wrong.length > 0 && <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => onAsk(`اشرحلي الأسئلة اللي غلطت فيها في الامتحان ده (رقم ${wrong.map((w) => w.i + 1).join("، ")}) واديني القاعدة اللي لازم أحفظها لكل واحد:\n\n${wrong.map(({ k, i }) => `${i + 1}) ${k.stem}`).join("\n\n")}`, { exam: false })}>اشرحلي أخطائي</button>}
           <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => onAsk(`اعملي امتحان تاني ${qs.length} أسئلة على نفس الموضوع (${exam.title}) بأسئلة مختلفة${weakList.length ? "، وركّز على: " + weakList.map(([t]) => t).join(", ") : ""}`, { exam: true })}>امتحان تاني</button>
         </div>
@@ -108,6 +116,7 @@ export default function ExamCard({ exam, onChange, onAsk, busy }) {
         <div className="exam-why" data-ok={right}>
           <b>{right ? "✅ إجابة صح" : "❌ إجابة غلط"}{!right && <small dir="ltr"> · الصح: {q.correct.map((j) => L[j]).join(", ")}</small>}</b>
           {q.rationale && <RichText text={q.rationale} />}
+          {!right && <small className="exam-saved"><Icon name="bookmark" size={13} /> اتحفظ السؤال ده في «غلطاتي»{onOpenMistakes && <> · <button type="button" className="linkbtn" onClick={onOpenMistakes}>افتحها</button></>}</small>}
           <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => askAbout(cur)}><Icon name="chat" size={15} /> اشرحلي أكتر</button>
         </div>
       )}
@@ -116,7 +125,7 @@ export default function ExamCard({ exam, onChange, onAsk, busy }) {
         <button type="button" className="iconbtn" onClick={() => set({ cur: cur - 1 })} disabled={cur === 0} aria-label="السؤال اللي قبله"><Icon name="chevRight" size={18} /></button>
         {!a.checked ? (
           <>
-            <button type="button" className="btn btn-teal btn-sm exam-go" disabled={!a.sel.length} onClick={() => setAns(cur, { checked: true })}>تأكيد الإجابة</button>
+            <button type="button" className="btn btn-teal btn-sm exam-go" disabled={!a.sel.length} onClick={confirm}>تأكيد الإجابة</button>
             <button type="button" className="btn btn-ghost btn-sm" disabled={waiting} onClick={nextOrResult}>{waiting ? "…" : last ? "النتيجة" : "تخطّي"}</button>
           </>
         ) : (

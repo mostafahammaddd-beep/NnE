@@ -1,8 +1,8 @@
 {
-  "appId": "com.nclexrn.app",
-  "appName": "NCLEX-RN",
+  "appId": "com.clinixstudy.app",
+  "appName": "ClinixStudy",
   "webDir": "dist",
-  "backgroundColor": "#1CA3BE",
+  "backgroundColor": "#FFFFFF",
   "plugins": {
     "CapacitorHttp": {
       "enabled": false

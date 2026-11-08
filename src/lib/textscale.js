@@ -14,7 +14,7 @@ import { prefs } from "./storage.js";
 export const STEPS = [0.8, 0.9, 1, 1.12, 1.25, 1.4, 1.6, 1.85, 2.1];
 export const MIN_SCALE = STEPS[0];
 export const MAX_SCALE = STEPS[STEPS.length - 1];
-const KEY = "nclex:ts:v1";
+const KEY = "clinix:ts:v1";
 const MAX_ENTRIES = 400;     // chat answers come and go: the oldest entries are dropped, the list can never grow without limit
 
 const clamp = (v) => Math.min(MAX_SCALE, Math.max(MIN_SCALE, v));

@@ -19,8 +19,8 @@ export const ENGINES = [
   { id: "gemini", label: "Gemini 💳", hint: "أعلى جودة · بيحتاج Billing" },
 ];
 const LABEL = { diagram: "رسم توضيحي", gemini: "Gemini" };
-const LS_ENGINE = "nclex:imgengine";
-const LS_BLOCK = "nclex:imgblock:gemini";
+const LS_ENGINE = "clinix:imgengine";
+const LS_BLOCK = "clinix:imgblock:gemini";
 
 export const getEngine = () => { try { const e = window.localStorage.getItem(LS_ENGINE); return ENGINES.some((x) => x.id === e) ? e : "diagram"; } catch (e) { return "diagram"; } };
 export const setEngine = (id) => { try { window.localStorage.setItem(LS_ENGINE, id); } catch (e) { /* ignore */ } };

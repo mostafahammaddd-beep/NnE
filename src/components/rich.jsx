@@ -4,6 +4,7 @@ import { hasArabic, wordLines, parseWord } from "../lib/parse.js";
 import { speak, warm, cycleSpeed, useSpeechState, useSpeed } from "../lib/speech.js";
 import { fixText } from "../lib/text.js";
 import { layout } from "../lib/emphasis.js";
+import { useLinks, findLinked, titleOf } from "../lib/linkctx.js";
 import { useVocab, setLevel, removeWord, vocabKey } from "../lib/vocab.js";
 
 /* ───────── pronunciation button (American male voice, see lib/speech.js) ───────── */
@@ -46,21 +47,53 @@ export function cleanMath(s) {
     .replace(/[`$]/g, "");
 }
 
-/* a piece of text with its emphasis: **bold** (key term) and ==highlight== (link to an earlier question) */
+/* a piece of text with its emphasis: **bold** (key term). The ==link== chips are handled by <LinkChip> below. */
 const Piece = ({ part }) => {
   let n = part.text;
-  if (part.hl) n = <mark className="link-hl">{n}</mark>;
   if (part.bold) n = <strong className="kw">{n}</strong>;
   return n;
 };
 
+const Nodes = ({ nodes }) => nodes.map((nd, i) => nd.run
+  ? <bdi key={i} dir="ltr" className="en">{nd.parts.map((p, k) => <Piece key={k} part={p} />)}</bdi>
+  : <React.Fragment key={i}>{nd.parts.map((p, k) => <Piece key={k} part={p} />)}</React.Fragment>);
+
+/* the small yellow chip "🔗 مرتبط بسؤال «…»": one element per clause. When the earlier question exists it is a button:
+   open it, highlight the matching part for 20 s, and offer a way back (App.jsx openLinked). */
+function LinkChip({ seg }) {
+  const L = useLinks();
+  const ref = React.useRef(null);
+  const q = L ? findLinked(L.questions, seg, L.selfId) : null;
+  const clean = String(seg).replace(/^\s*🔗\s*/u, "").replace(/==/g, "").trim();
+  const nodes = layout(cleanMath(fixText(clean)));
+  const act = (e) => {
+    e.preventDefault(); e.stopPropagation();
+    if (!q || !L) return;
+    const el = ref.current;
+    const block = el && (el.closest(".li, .num, .tip, .trans, .quote") || el.closest("p, h4"));
+    const mine = el ? el.textContent : "";
+    const around = block ? (block.textContent || "").replace(mine, " ") : "";
+    L.open(q, `${around} ${titleOf(seg)}`.replace(/\s+/g, " ").trim());
+  };
+  return (
+    <mark ref={ref} className="link-chip" data-live={q ? "1" : undefined}
+      {...(q ? { role: "button", tabIndex: 0, title: `افتح السؤال المرتبط: ${q.title}`, onClick: act, onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") act(e); } } : {})}>
+      <span className="link-chip-ico" aria-hidden="true"><Icon name="link" size={11} stroke={2.4} /></span>
+      <Nodes nodes={nodes} />
+    </mark>
+  );
+}
+
 export function Inline({ text }) {
-  const nodes = layout(cleanMath(fixText(text || "")));
+  let src = cleanMath(fixText(text || ""));
+  if ((src.match(/==/g) || []).length % 2) src = src.replace(/==(?![\s\S]*==)/, "");   // an unmatched marker is noise
+  if (!src.includes("==")) return <Nodes nodes={layout(src)} />;
   return (
     <>
-      {nodes.map((nd, i) => nd.run
-        ? <bdi key={i} dir="ltr" className="en">{nd.parts.map((p, k) => <Piece key={k} part={p} />)}</bdi>
-        : <React.Fragment key={i}>{nd.parts.map((p, k) => <Piece key={k} part={p} />)}</React.Fragment>)}
+      {src.split("==").map((seg, i) => {
+        if (!seg) return null;
+        return i % 2 ? <LinkChip key={i} seg={seg} /> : <Nodes key={i} nodes={layout(seg)} />;
+      })}
     </>
   );
 }

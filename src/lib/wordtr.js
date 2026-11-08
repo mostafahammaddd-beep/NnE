@@ -22,7 +22,7 @@ const TOTAL_TIMEOUT = 16000;       // the student never waits longer than this f
 let _key = "";
 export const setTranslateKey = (k) => { _key = k || ""; };
 
-const LS = "nclex:wtr:v2";
+const LS = "clinix:wtr:v2";
 const mem = new Map();
 
 function readCache() {
@@ -183,7 +183,7 @@ export async function translateWord({ word, signal, onQuick }) {
 }
 
 /* ── sentence (selected text) ── */
-const LS_S = "nclex:str:v1";
+const LS_S = "clinix:str:v1";
 const smem = new Map();
 const sKey = (t) => t.toLowerCase().replace(/\s+/g, " ").trim();
 function readS() { try { return JSON.parse(window.localStorage.getItem(LS_S)) || {}; } catch (e) { return {}; } }

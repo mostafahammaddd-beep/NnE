@@ -46,7 +46,7 @@ function Gallery({ items, onOpen, active }) {
     (async () => {
       const out = [];
       for (const q of items) {
-        const rec = await store.get(`nclex:img:${q.id}`);
+        const rec = await store.get(`clinix:img:${q.id}`);
         let list = rec ? itemsFromSaved(rec.data, rec.doc) : [];
         if (!list.length && q.thumb) list = [{ t: "image", url: q.thumb, name: q.title, label: "IMG" }];
         out.push({ q, list });

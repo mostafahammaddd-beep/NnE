@@ -1,3 +1,4 @@
+import "./lib/legacy.js";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource/cairo/400.css";
@@ -8,6 +9,7 @@ import "./styles.css";
 import App from "./App.jsx";
 import { loadBoot } from "./lib/storage.js";
 import { initVocab } from "./lib/vocab.js";
+import { initMistakes } from "./lib/mistakes.js";
 import { splashFailsafe } from "./lib/splash.js";
 
 /* ───────── start-up ─────────
@@ -32,7 +34,7 @@ async function fontsReady() {
   } catch (e) { /* fall back to system font */ }
 }
 
-const EMPTY_BOOT = { questions: [], words: [], apiKey: "", mode: null, goal: 5, perf: {}, topics: { list: [], pinned: [], auto: true }, vocab: {} };
+const EMPTY_BOOT = { questions: [], words: [], apiKey: "", mode: null, goal: 5, perf: {}, topics: { list: [], pinned: [], auto: true }, vocab: {}, mistakes: [] };
 
 async function start() {
   const [boot] = await Promise.all([
@@ -40,6 +42,7 @@ async function start() {
     fontsReady(),
   ]);
   initVocab(boot.vocab);
+  initMistakes(boot.mistakes);
   createRoot(document.getElementById("root")).render(<App boot={boot} />);
 }
 

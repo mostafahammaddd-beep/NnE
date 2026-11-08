@@ -112,7 +112,7 @@ ${cap(exp, Math.round(per * 0.45))}${tricks ? `\nTRAPS / KEY POINTS:\n${cap(tric
    focusId    the saved item currently open on screen (already given to the model in full elsewhere)
    focusTopicId  the topic screen the student is on
    returns { text, codes: { S3: {id,title} }, used: [ids] } — text is "" when the library is empty */
-export function libraryContext({ questions, topics, query, focusId, focusTopicId, maxItems = 6, perItem = 3200, budget = 24000, forceTopic = null }) {
+export function libraryContext({ questions, topics, query, focusId, focusTopicId, maxItems = 6, perItem = 3200, budget = 24000, forceTopic = null, forceIds = null }) {
   const idx = buildIndex(questions || [], topics);
   if (!idx.N) return { text: "", codes: {}, used: [], count: 0 };
   const codes = {};
@@ -124,10 +124,17 @@ export function libraryContext({ questions, topics, query, focusId, focusTopicId
     const extra = idx.byTopic.get(forceTopic).filter((it) => !chosen.includes(it) && it.q.id !== focusId);
     chosen = [...chosen, ...extra].slice(0, maxItems + 2);
   }
+  /* a slice of a library-wide summary: exactly the items it owns, every one of them, each as long as the budget allows */
+  let per = perItem;
+  if (forceIds && forceIds.length) {
+    const own = new Set(forceIds);
+    chosen = idx.items.filter((it) => own.has(it.q.id)).slice(0, 16);
+    per = Math.max(700, Math.min(3000, Math.floor((budget - 3000) / Math.max(1, chosen.length))));
+  }
   let used = 0;
   const blocks = [];
   for (const it of chosen) {
-    const b = detail(it, perItem);
+    const b = detail(it, per);
     if (used + b.length > budget) break;
     used += b.length; blocks.push(b);
   }

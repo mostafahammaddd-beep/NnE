@@ -1,9 +1,9 @@
-/* NCLEX-RN — desktop shell (Electron).
+/* ClinixStudy — desktop shell (Electron).
    Loads the exact same built web app (dist/) that the Android version uses; nothing in src/ changes. */
 const { app, BrowserWindow, shell, session, Menu } = require("electron");
 const path = require("path");
 
-const BRAND = "#1CA3BE";
+const BRAND = "#FFFFFF";
 /* Hosts the page may call from file:// . Every one of them gets CORS headers added to its replies (Electron allows ONE
    onHeadersReceived listener, so they all go in this single list). v3.20: the word / sentence translation hosts were missing,
    so the browser blocked every translation reply ("مقدرتش أترجمها" with a perfect connection). */
@@ -16,6 +16,9 @@ const CORS_HOSTS = [
   "https://translate.google.com/*",
   "https://clients5.google.com/*",
   "https://api.mymemory.translated.net/*",         // translation: fallback provider
+  "https://customsearch.googleapis.com/*",         // photos (v3.29): Google · Unsplash · Pexels
+  "https://api.unsplash.com/*",
+  "https://api.pexels.com/*",
 ];
 
 if (!app.requestSingleInstanceLock()) {
@@ -31,7 +34,7 @@ function createWindow() {
     minWidth: 420,
     minHeight: 600,
     backgroundColor: BRAND,
-    title: "NCLEX-RN",
+    title: "ClinixStudy",
     icon: path.join(__dirname, "..", "assets", "icon-only.png"),
     autoHideMenuBar: true,
     webPreferences: {

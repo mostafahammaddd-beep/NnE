@@ -75,7 +75,7 @@ export async function uploadToGoogle({ apiKey, mimeType, data, name, signal, fet
    (up to 14 MB each time). Now an upload is remembered (per key, 40 h) and every later request — chat turns included — just
    points at it. Anything wrong with a remembered link (expired, deleted) → Google refuses → the caller's existing
    "file error → send inline" fallback repeats the request, and the stale link is forgotten. */
-const LS_UP = "nclex:gfiles:v1";
+const LS_UP = "clinix:gfiles:v1";
 const UP_TTL = 40 * 3600e3;
 const tagOf = (k) => String(k || "").slice(-8);
 export const memoryStore = {

@@ -8,7 +8,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from
 import { createPortal } from "react-dom";
 import Icon from "./Icon.jsx";
 
-const LS = "nclex:ink:v1";
+const LS = "clinix:ink:v1";
 const COLORS = [
   { id: "red", c: "#E5352B", label: "أحمر" },
   { id: "blue", c: "#1E6FE0", label: "أزرق" },

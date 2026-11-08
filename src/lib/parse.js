@@ -35,8 +35,9 @@ export function cleanOcr(raw) {
    Medical terms and abbreviations are never dropped (a single common word tagged MED, like "pain", still is: it is not a new term). */
 import { BASIC } from "./basicwords.js";
 import { COMMON } from "./commonwords.js";
+import { B1_EXTRA } from "./b1words.js";
 
-const KNOWN = (w) => BASIC.has(w) || COMMON.has(w);
+const KNOWN = (w) => BASIC.has(w) || COMMON.has(w) || B1_EXTRA.has(w);
 /* base forms of an inflected word: plural, -ed, -ing, -ly, -er/-est (a stem must still be a real word of 3+ letters) */
 const stems = (w) => {
   const o = [w.replace(/'s$/, ""), w.replace(/ies$/, "y"), w.replace(/(sh|ch|x|ss|zz|o)es$/, "$1"), w.replace(/s$/, ""),
@@ -61,20 +62,38 @@ export function isEasy(term) {
 const TAG_RE = /^\s*[[(]\s*(A1|A2|B1|B2|C1|C2|MED|ABBR)\s*[\])]\s*[:\-–—]?\s*/i;
 const LOW = new Set(["A1", "A2", "B1"]);
 
+const tokensOf = (term) => String(term || "").toLowerCase().replace(/[^a-z' -]/g, " ").split(/[\s-]+/).filter(Boolean);
+
+/* A phrase made only of everyday words is worth a card only when it is a REAL phrasal verb / idiom (rule out, cut back on, take care of)
+   or one of the fixed NCLEX sentences ("requires further teaching"). "take medication", "go to bed", "blood pressure" are not.
+   (v3.27: before, any phrase the AI labelled B2+ stayed, so plain phrases leaked into the list.) */
+const ADV = new Set(["out", "up", "off", "down", "over", "back", "through", "away", "along", "around", "apart", "aside", "forward", "ahead", "about", "into", "onto", "across", "behind", "by", "after"]);
+const PREP = new Set(["on", "of", "with", "to", "for", "from", "at", "in"]);
+/* the very first verbs a learner meets: "go out", "sit down", "pick up", "wait for" are A1 / A2 phrases, never new words */
+const BASIC_VERBS = new Set(["go", "come", "get", "sit", "stand", "wake", "look", "talk", "wait", "turn", "put", "take", "give", "have", "be", "do", "make", "say", "see", "use", "ask", "call", "pick", "show", "help", "keep", "let", "run", "walk", "work", "find", "check", "fall", "stay", "start", "stop", "try", "play", "feel", "tell", "think", "want", "need", "like", "live", "eat", "drink", "sleep", "wash", "open", "close", "pay", "buy"]);
+const EXAM_PHRASE = /\b(?:requires?|needs?|needed)\s+(?:further|more|additional)\s+(?:teaching|instruction|education|information)\b|\bunderstands?\s+(?:the\s+)?teaching\b|\b(?:most|least|best|first|next)\s+(?:appropriate|important|likely|effective)\b|\bpriority\b/;
+function isRealPhrase(toks, term) {
+  if (EXAM_PHRASE.test(String(term || "").toLowerCase())) return true;
+  if (toks.length < 2 || toks.length > 5) return false;
+  if (BASIC_VERBS.has(toks[0])) return false;
+  /* verb + particle ("rule out", "cut back on") or verb + preposition ("deal with", "rely on") */
+  return ADV.has(toks[1]) || PREP.has(toks[toks.length - 1]) || toks.slice(1, -1).some((t) => ADV.has(t));
+}
+
 /* one entry: should it stay in the list? */
 export function keepEntry(tag, term) {
   const tg = String(tag || "").toUpperCase();
   if (LOW.has(tg)) return false;                                     // the AI itself says it is easy
   if (tg === "ABBR") return true;
-  if (tg === "MED") {                                                // a medical phrase stays; one plain everyday word does not
-    const toks = String(term || "").toLowerCase().replace(/[^a-z' -]/g, " ").split(/[\s-]+/).filter(Boolean);
-    return !(toks.length === 1 && isBasicWord(toks[0]));
+  const toks = tokensOf(term);
+  if (tg === "MED") {                                                // a medical term stays; one plain everyday word does not,
+    if (toks.length === 1) return !isBasicWord(toks[0]);             // and neither do two plain words ("blood pressure", "chest pain")
+    if (toks.length === 2 && toks.every(isBasicWord)) return false;
+    return true;
   }
   if (!isEasy(term)) return true;
-  /* a phrase of known words (rule out, requires further teaching) is the hardest kind of English for a learner: when the AI
-     labels it B2+, it stays */
-  const toks = String(term || "").toLowerCase().replace(/[^a-z' -]/g, " ").split(/[\s-]+/).filter(Boolean);
-  return ["B2", "C1", "C2"].includes(tg) && toks.length >= 2 && toks.length <= 5;
+  /* every word of it is everyday English: only a real phrasal verb / idiom / fixed exam phrase the AI labels B2+ is worth keeping */
+  return ["B2", "C1", "C2"].includes(tg) && isRealPhrase(toks, term);
 }
 
 /* split off the level tag:  "[C1] adverse — …"  →  { tag: "C1", line: "adverse — …" } */

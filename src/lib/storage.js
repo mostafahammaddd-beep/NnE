@@ -5,14 +5,61 @@
 
 import { shapeTopics } from "./topics.js";
 
+/* v3.27 — the app was renamed (NCLEX-RN → ClinixStudy): the database and every key got the new name.
+   Whatever the student saved under the old names is copied over ONCE, the first time the new database opens (the old one is left untouched). */
+const DB_NAME = "clinix-study", OLD_DB = "nclex-rn", MIGRATED = "clinix:idb-migrated";
+const renameKey = (k) => (typeof k === "string" && k.startsWith("nclex:") ? `clinix:${k.slice(6)}` : k);
+
+function readLegacyDb() {
+  return new Promise((resolve) => {
+    try {
+      const r = indexedDB.open(OLD_DB);
+      r.onerror = () => resolve(null);
+      r.onblocked = () => resolve(null);
+      r.onsuccess = () => {
+        const old = r.result;
+        if (!old.objectStoreNames.contains("kv")) { old.close(); return resolve(null); }
+        const tx = old.transaction("kv", "readonly");
+        const st = tx.objectStore("kv");
+        const keys = st.getAllKeys(), vals = st.getAll();
+        tx.oncomplete = () => { old.close(); resolve({ keys: keys.result, vals: vals.result }); };
+        tx.onerror = tx.onabort = () => { old.close(); resolve(null); };
+      };
+    } catch (e) { resolve(null); }
+  });
+}
+
+async function migrateLegacyDb(db) {
+  try { if (window.localStorage.getItem(MIGRATED)) return; } catch (e) { /* no localStorage: just try */ }
+  try {
+    if (typeof indexedDB.databases === "function") {
+      const list = await indexedDB.databases();
+      if (!list.some((d) => d.name === OLD_DB)) { try { window.localStorage.setItem(MIGRATED, "1"); } catch (e) { /* ignore */ } return; }
+    }
+    const old = await readLegacyDb();
+    if (!old || !old.keys.length) return;
+    await new Promise((resolve) => {
+      const tx = db.transaction("kv", "readwrite");
+      const st = tx.objectStore("kv");
+      const have = st.getAllKeys();
+      have.onsuccess = () => {
+        const set = new Set(have.result);
+        old.keys.forEach((k, i) => { const nk = renameKey(k); if (!set.has(nk)) st.put(old.vals[i], nk); });   // never overwrites something already saved under the new name
+      };
+      tx.oncomplete = resolve; tx.onerror = resolve; tx.onabort = resolve;
+    });
+    try { window.localStorage.setItem(MIGRATED, "1"); } catch (e) { /* ignore */ }
+  } catch (e) { /* the old data stays where it is; the app starts with the new database */ }
+}
+
 let _dbp = null;
 const openDb = () => {
   if (!_dbp) {
     _dbp = new Promise((resolve, reject) => {
       if (typeof indexedDB === "undefined") return reject(new Error("no idb"));
-      const r = indexedDB.open("nclex-rn", 1);
+      const r = indexedDB.open(DB_NAME, 1);
       r.onupgradeneeded = () => r.result.createObjectStore("kv");
-      r.onsuccess = () => resolve(r.result);
+      r.onsuccess = () => { const db = r.result; migrateLegacyDb(db).then(() => resolve(db), () => resolve(db)); };
       r.onerror = () => reject(r.error);
     });
   }
@@ -53,7 +100,7 @@ export const store = {
   },
 };
 
-const BOOT_KEYS = ["nclex:questions", "nclex:words", "nclex:apikey", "nclex:mode", "nclex:goal", "nclex:perf", "nclex:topics", "nclex:vocab"];
+const BOOT_KEYS = ["clinix:questions", "clinix:words", "clinix:apikey", "clinix:mode", "clinix:goal", "clinix:perf", "clinix:topics", "clinix:vocab", "clinix:mistakes"];
 
 export async function loadBoot() {
   try {
@@ -79,14 +126,15 @@ export async function loadBoot() {
 
 function shape(o) {
   return {
-    questions: Array.isArray(o["nclex:questions"]) ? o["nclex:questions"] : [],
-    words: Array.isArray(o["nclex:words"]) ? o["nclex:words"] : [],
-    apiKey: typeof o["nclex:apikey"] === "string" ? o["nclex:apikey"].trim() : "",
-    mode: typeof o["nclex:mode"] === "string" ? o["nclex:mode"] : null,
-    goal: Number.isFinite(o["nclex:goal"]) ? o["nclex:goal"] : 5,
-    topics: shapeTopics(o["nclex:topics"]),
-    vocab: o["nclex:vocab"] && typeof o["nclex:vocab"] === "object" ? o["nclex:vocab"] : {},
-    perf: o["nclex:perf"] && typeof o["nclex:perf"] === "object" ? o["nclex:perf"] : {},
+    questions: Array.isArray(o["clinix:questions"]) ? o["clinix:questions"] : [],
+    words: Array.isArray(o["clinix:words"]) ? o["clinix:words"] : [],
+    apiKey: typeof o["clinix:apikey"] === "string" ? o["clinix:apikey"].trim() : "",
+    mode: typeof o["clinix:mode"] === "string" ? o["clinix:mode"] : null,
+    goal: Number.isFinite(o["clinix:goal"]) ? o["clinix:goal"] : 5,
+    topics: shapeTopics(o["clinix:topics"]),
+    mistakes: Array.isArray(o["clinix:mistakes"]) ? o["clinix:mistakes"] : [],
+    vocab: o["clinix:vocab"] && typeof o["clinix:vocab"] === "object" ? o["clinix:vocab"] : {},
+    perf: o["clinix:perf"] && typeof o["clinix:perf"] === "object" ? o["clinix:perf"] : {},
   };
 }
 

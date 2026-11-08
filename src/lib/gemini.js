@@ -36,6 +36,7 @@
    • If WebView fetch cannot reach Google (CORS / network), it falls back to the native Capacitor HTTP client
      (non-streaming) automatically.                                                                       */
 
+import { mergeGrounding } from "./sources.js";
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { MODEL_FAST, MODEL_PRO } from "./config.js";
 import {
@@ -157,14 +158,14 @@ const DEFAULT_LISTS = {
   fast: [MODEL_FAST, "gemini-flash-latest", "gemini-flash-lite-latest"],
   pro: [MODEL_PRO, "gemini-pro-latest", "gemini-3.1-pro-preview"],
 };
-const LS_MODELS = "nclex:models:v5";
+const LS_MODELS = "clinix:models:v5";
 const keyTag = (k) => (k || "").slice(-8);
 let _lists = null;
 
 /* models that are unavailable for this key (404 / quota 0): remembered across restarts for a few hours,
    so the first analysis of a new session does not waste a round trip on a model that cannot answer.
    RETIRED models ("no longer available to new users") are remembered for a week and survive list refreshes. */
-const LS_DEAD = "nclex:dead:v2";
+const LS_DEAD = "clinix:dead:v2";
 const DEAD_TTL = 6 * 3600e3;
 const RETIRED_TTL = 7 * 864e5;
 let _deadMem = null;
@@ -194,7 +195,7 @@ const clearDead = (apiKey) => {            // a fresh model list gives temporary
 };
 
 /* the replacement Google names inside a "no longer available" error is trusted for the next analysis too */
-const LS_SUGGEST = "nclex:suggest:v1";
+const LS_SUGGEST = "clinix:suggest:v1";
 const readSuggest = (apiKey) => {
   try { const r = JSON.parse(window.localStorage.getItem(LS_SUGGEST)); if (r && r.k === keyTag(apiKey) && Date.now() - r.t < 30 * 864e5) return r.models || []; } catch (e) { /* ignore */ }
   return [];
@@ -340,7 +341,7 @@ function ladderFor(model, spec) {
   return [...spec.levels.map((l) => ({ thinkingLevel: l })), bud, null];
 }
 
-const memoKey = (model, task) => `nclex:tl:${model}|${task}`;
+const memoKey = (model, task) => `clinix:tl:${model}|${task}`;
 const readMemo = (model, task) => { try { return parseInt(window.localStorage.getItem(memoKey(model, task)) || "0", 10) || 0; } catch (e) { return 0; } };
 const writeMemo = (model, task, i) => { try { window.localStorage.setItem(memoKey(model, task), String(i)); } catch (e) { /* ignore */ } };
 
@@ -365,7 +366,7 @@ function readParts(json) {
   const parts = cand?.content?.parts || [];
   const text = parts.filter((p) => !p.thought && typeof p.text === "string").map((p) => p.text).join("");
   const alive = parts.some((p) => typeof p.text === "string"); // visible text OR a thought summary
-  return { text, alive, finish: cand?.finishReason || null, block: json?.promptFeedback?.blockReason || null };
+  return { text, alive, finish: cand?.finishReason || null, block: json?.promptFeedback?.blockReason || null, grounding: cand?.groundingMetadata || null };
 }
 
 async function fetchStream({ apiKey, model, body, signal, onText, onAlive, firstMs, idleMs = 45000 }) {
@@ -378,7 +379,7 @@ async function fetchStream({ apiKey, model, body, signal, onText, onAlive, first
   const arm = (ms, w) => { clearTimeout(timer); timer = setTimeout(() => { why = w; ctrl.abort(); }, ms); };
   arm(firstMs, "first-byte");
 
-  let full = "", finish = null, block = null;
+  let full = "", finish = null, block = null, grounding = null;
   const handle = (line) => {
     if (!line.startsWith("data:")) return;
     const payload = line.slice(5).trim();
@@ -390,6 +391,7 @@ async function fetchStream({ apiKey, model, body, signal, onText, onAlive, first
     if (r.alive && onAlive) onAlive();
     if (r.finish) finish = r.finish;
     if (r.block) block = r.block;
+    if (r.grounding) grounding = mergeGrounding(grounding, r.grounding);   // the pages Google Search used (sent in pieces, mostly at the end)
     if (r.text) { full += r.text; onText(full); }
   };
 
@@ -436,7 +438,7 @@ async function fetchStream({ apiKey, model, body, signal, onText, onAlive, first
     clearTimeout(timer);
     signal.removeEventListener("abort", link);
   }
-  return { text: full, finish, block };
+  return { text: full, finish, block, grounding };
 }
 
 /* Native (non-streaming) fallback — used only if WebView fetch cannot reach Google. */
@@ -474,12 +476,14 @@ async function streamOrNative(args) {
   return nativeOnce(args);
 }
 
-async function attemptModel({ apiKey, model, task, system, parts, spec, maxOut, signal, onText, onAlive, firstMs, idleMs }) {
+async function attemptModel({ apiKey, model, task, system, parts, spec, maxOut, signal, onText, onAlive, firstMs, idleMs, search }) {
   const rungs = ladderFor(model, spec);
   let idx = Math.min(readMemo(model, task), rungs.length - 1);
+  let searching = !!search;       // Google Search grounding: the model looks the facts up before it answers
   for (;;) {
     const body = { contents: [{ role: "user", parts }], generationConfig: genConfig(model, rungs[idx], maxOut, task) };
     if (system) body.systemInstruction = { parts: [{ text: system }] };
+    if (searching) body.tools = [{ google_search: {} }];
     try {
       trackRequest(model);                                       // every request counts against the daily quota
       const out = await streamOrNative({ apiKey, model, body, signal, onText, onAlive, firstMs, idleMs });
@@ -488,9 +492,11 @@ async function attemptModel({ apiKey, model, task, system, parts, spec, maxOut, 
           { detail: `${model} · ${out.finish || out.block || "empty"}`, emptyReply: true, blocked: !!out.block });
       }
       writeMemo(model, task, idx);
-      return out;
+      return { ...out, searched: searching };
     } catch (e) {
       if (e.thinking && idx < rungs.length - 1) { idx += 1; continue; }
+      /* this model refuses the search tool (a 400 that mentions it): answer WITHOUT it rather than not at all; the app then says "no sources" */
+      if (searching && e && e.status === 400 && !e.thinking && /tool|search|ground|retriev/i.test(String(e.detail || e.message || ""))) { searching = false; continue; }
       if (e && !e.detail) e.detail = model;
       else if (e && e.detail && !e.detail.includes(model)) e.detail = `${model} · ${e.detail}`;
       throw e;
@@ -618,7 +624,7 @@ const MAX_HINT_MS = 25000;        // everything asleep for longer than this → 
       seconds a second lane is raced against it (hedging) and the first sign of life wins
    3. only when EVERY lane is asleep does the engine wait — for the first one to wake up, never longer than MAX_WAIT_MS in total
    `hedgeMs` is accepted and ignored (old callers). */
-export async function runTask({ apiKey, models, task, system, parts, spec, maxOut, firstMs, idleMs, signal, onText, onNotice }) {
+export async function runTask({ apiKey, models, task, system, parts, spec, maxOut, firstMs, idleMs, signal, onText, onNotice, engineMode, hedgeClass, search }) {
   if (typeof onText !== "function") onText = () => {};
   if (!signal) signal = new AbortController().signal;
   if (signal.aborted) throw abortError();
@@ -626,8 +632,12 @@ export async function runTask({ apiKey, models, task, system, parts, spec, maxOu
   const order = [...new Set(models)];
   if (!order.length) throw new Error("مفيش موديل متاح دلوقتي.");
 
-  const cls = taskClass(task);
-  const mode = getEngineMode();
+  /* v3.27 — the tutor chat's "reply level" can override two things for ONE call: the student's engine mode (a deep answer must come from the
+     strong Google model, never from a small fast lane) and the class used for hedging (a model that THINKS for 30 s must not be raced by a
+     weaker lane after 4 s) */
+  /* a search first makes the first word come later: such a request waits a little longer than a plain chat before a second lane is raced against it */
+  const cls = hedgeClass || (search ? "search" : taskClass(task));
+  const mode = engineMode || getEngineMode();
   const media = mediaOf(parts);
   /* how big the request is for a lane with a small token window: the prompt plus a realistic answer (not the generous maxOut cap) */
   const tokens = estimateTokens(system, parts, Math.min(maxOut || 0, cls === "chat" ? 1500 : 3000));
@@ -713,7 +723,7 @@ export async function runTask({ apiKey, models, task, system, parts, spec, maxOu
       };
       const closeRec = () => { rec.over = true; rec.end(); signal.removeEventListener("abort", link); };
       attemptLane({
-        lane, apiKey, task, system, parts, spec, maxOut, signal: ctrl.signal, firstMs, idleMs,
+        lane, apiKey, task, system, parts, spec, maxOut, signal: ctrl.signal, firstMs, idleMs, search,
         onText: (t) => { if (winner === rec) show(lane, t); },
         onAlive: claim,
       }).then((res) => {
@@ -790,7 +800,7 @@ export async function runTask({ apiKey, models, task, system, parts, spec, maxOu
    Model ids change often → the list is read from the API for THIS key (cached 12 h); a static list is the fallback. */
 
 const IMG_PREFERRED = ["gemini-3.1-flash-image", "gemini-nano-banana-2.1", "gemini-3.1-flash-image-preview", "gemini-3-pro-image", "gemini-3-pro-image-preview", "gemini-3.1-flash-lite-image", "gemini-2.5-flash-image"];
-const LS_IMG = "nclex:imgmodels:v1";
+const LS_IMG = "clinix:imgmodels:v1";
 
 async function imageModels(apiKey) {
   try {

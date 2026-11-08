@@ -1,8 +1,8 @@
 {
-  "name": "nclex-rn",
-  "productName": "NCLEX-RN",
-  "version": "3.26.0",
-  "description": "NCLEX-RN study app (Android via Capacitor, Windows via Electron)",
+  "name": "clinixstudy",
+  "productName": "ClinixStudy",
+  "version": "3.31.0",
+  "description": "ClinixStudy — NCLEX-RN study app (Android via Capacitor, Windows via Electron)",
   "author": "MOSTAFA HAMMAD",
   "private": true,
   "type": "module",
@@ -13,11 +13,13 @@
     "preview": "vite preview",
     "desktop": "npm run build && electron .",
     "desktop:build": "npm run build && electron-builder --win --x64 --publish never",
-    "test": "node --import ./tests/register.mjs --test tests/engine.test.mjs tests/chat.test.mjs"
+    "test": "node --import ./tests/register.mjs --test tests/engine.test.mjs tests/chat.test.mjs tests/words.test.mjs tests/photos.test.mjs tests/mistakes.test.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^6.2.0",
     "@capacitor/core": "^6.2.0",
+    "@capacitor/filesystem": "^6.0.4",
+    "@capacitor/share": "^6.0.4",
     "@capacitor/splash-screen": "^6.0.3",
     "@fontsource/cairo": "^5.1.0",
     "react": "^18.3.1",
@@ -31,8 +33,8 @@
     "vite": "^5.4.11"
   },
   "build": {
-    "appId": "com.nclexrn.desktop",
-    "productName": "NCLEX-RN",
+    "appId": "com.clinixstudy.desktop",
+    "productName": "ClinixStudy",
     "directories": {
       "output": "release"
     },
@@ -50,14 +52,14 @@
       "icon": "assets/icon-only.png"
     },
     "nsis": {
-      "artifactName": "NCLEX-RN-Setup-${version}.exe",
+      "artifactName": "ClinixStudy-Setup-${version}.exe",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     },
     "portable": {
-      "artifactName": "NCLEX-RN-Portable-${version}.exe"
+      "artifactName": "ClinixStudy-Portable-${version}.exe"
     }
   }
 }

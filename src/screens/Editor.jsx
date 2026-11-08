@@ -18,6 +18,7 @@ import { wordLines } from "../lib/parse.js";
 import { detectQuestions, runBatch, focusNote } from "../lib/batch.js";
 import { bestField } from "../lib/library.js";
 import { flashPassage, clearFlash } from "../lib/highlight.js";
+import { LinkCtx, useLinks } from "../lib/linkctx.js";
 
 const TASK_OF = { original_question_text: "ocr", new_words: "words", explanation: "reason", tricks: "reason" };
 const NULLS = { original_question_text: null, new_words: null, explanation: null, tricks: null };
@@ -217,7 +218,7 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
     let tries = 0, stop = false, t = 0;
     const attempt = () => {
       if (stop) return;
-      if (flashPassage(field, highlight.text)) { shown(); return; }
+      if (flashPassage(field, highlight.text, highlight.ms ? { ms: highlight.ms } : {})) { shown(); return; }
       if (++tries < 14) t = setTimeout(attempt, 120); else shown();   // the section needs a moment to open and draw
     };
     t = setTimeout(attempt, 180);
@@ -296,11 +297,11 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
   useEffect(() => {
     if (!initial?.id) return;
     let alive = true;
-    store.get(`nclex:img:${initial.id}`).then((r) => { if (alive && r?.data) { setImageUrl(r.data); setDoc(r.doc || null); setItems(itemsFromSaved(r.data, r.doc)); } });
+    store.get(`clinix:img:${initial.id}`).then((r) => { if (alive && r?.data) { setImageUrl(r.data); setDoc(r.doc || null); setItems(itemsFromSaved(r.data, r.doc)); } });
     return () => { alive = false; };
   }, [initial?.id]);
 
-  const pickMode = (m) => { setMode(m); store.set("nclex:mode", m); };
+  const pickMode = (m) => { setMode(m); store.set("clinix:mode", m); };
 
   /* ── the source: pictures / files / typed text ── */
   const itemsRef = useRef([]);
@@ -542,7 +543,12 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
   ].filter(Boolean).join(" · ");
   const errCount = Object.values(status).filter((s) => s === "error").length;
 
+  /* link chips inside this question: tell the App which question the student is leaving (the saved id, even before the URL knows it) */
+  const outerLinks = useLinks();
+  const links = useMemo(() => (outerLinks ? { ...outerLinks, selfId: savedId || outerLinks.selfId, open: (q, claim) => outerLinks.open(q, claim, savedId || null) } : null), [outerLinks, savedId]);
+
   return (
+    <LinkCtx.Provider value={links}>
     <div className="page">
       {nav ? (
         <div className="topic-nav" role="navigation" aria-label="التنقل داخل الموضوع">
@@ -668,10 +674,11 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
           {chatEver && (
             <ChatPanel open={chatOpen} onClose={() => setChatOpen(false)} apiKey={apiKey} onNeedKey={onNeedKey}
               ctx={{ kind, question: result?.original_question_text, explanation: result?.explanation, tricks: result?.tricks, imageUrl, doc }}
-              chipIds={chips} storeKey={savedId ? `nclex:chat:${savedId}` : null} library={lib} onOpenItem={onOpenItem} />
+              chipIds={chips} storeKey={savedId ? `clinix:chat:${savedId}` : null} library={lib} onOpenItem={onOpenItem} />
           )}
         </>
       )}
     </div>
+    </LinkCtx.Provider>
   );
 }

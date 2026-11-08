@@ -1,19 +1,20 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from "react";
 import { useVoiceEngine, setVoiceEngine } from "../lib/speech.js";
 import Icon from "./Icon.jsx";
+import logoMark from "../assets/logo-mark.webp";
+import PhotoKeysPanel from "./PhotoKeys.jsx";
+import { getPhotoKeys, setPhotoKeys } from "../lib/photos.js";
 import { testConnection, testExtProviders, warmExternal } from "../lib/gemini.js";
 import { PROVIDERS, PROVIDER_IDS, getSavedExtKeys, setExtKeys, getEnginePrefs, setEnginePrefs } from "../lib/providers.js";
 
-/* The same yellow ECG line as the app icon, on the same teal → sky gradient. */
+/* The ClinixStudy logo (emblem + two-tone wordmark). The emblem sits on a white chip so it reads in both themes. */
 export function Brand({ onClick }) {
   return (
-    <button onClick={onClick} className="brand" aria-label="NCLEX-RN">
+    <button onClick={onClick} className="brand" aria-label="ClinixStudy">
       <span className="mark">
-        <svg width="26" height="26" viewBox="0 0 26 26" fill="none" aria-hidden="true">
-          <path d="M3 14.5h5.2l2.3-6.4 3.7 11.2 2.7-6.2h5.1" stroke="#FFCA3A" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <img src={logoMark} alt="" width="40" height="40" draggable="false" />
       </span>
-      <span className="wordmark">NCLEX-RN</span>
+      <span className="wordmark"><span className="w-clinix">Clinix</span><span className="w-study">Study</span></span>
     </button>
   );
 }
@@ -134,7 +135,8 @@ export function KeyModal({ current, hasEnv, onSave, onClose }) {
   const [xkeys, setXkeys] = useState(getSavedExtKeys);
   const [prefs, setPrefs] = useState(getEnginePrefs);
   const [xtest, setXtest] = useState([]);
-  const persist = () => { setExtKeys(xkeys); setEnginePrefs(prefs); };       // the extra engines are saved here; the Gemini key goes through onSave
+  const [pkeys, setPkeys] = useState(getPhotoKeys);
+  const persist = () => { setExtKeys(xkeys); setEnginePrefs(prefs); setPhotoKeys(pkeys); };       // the extra engines are saved here; the Gemini key goes through onSave
   const runTest = async () => {
     const k = (val || "").trim() || current;
     persist();
@@ -161,6 +163,7 @@ export function KeyModal({ current, hasEnv, onSave, onClose }) {
         <input value={val} onChange={(e) => setVal(e.target.value)} dir="ltr" className="input"
           placeholder="AIza…" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
         <EnginePanel keys={xkeys} setKeys={setXkeys} prefs={prefs} setPrefs={setPrefs} />
+        <PhotoKeysPanel keys={pkeys} setKeys={setPkeys} />
         <VoicePick />
         <button onClick={runTest} disabled={testing} className="btn btn-ghost" style={{ width: "100%", marginTop: 12 }}>
           {testing ? "بنجرّب الاتصال…" : "جرّب الاتصال"}

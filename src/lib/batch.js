@@ -13,7 +13,7 @@ import { sourceParts, makeSource } from "./docs.js";
 
 export const MAX_BATCH = 40;
 
-const SYSTEM = `You are the intake clerk of an NCLEX-RN study app. The student uploaded files (screenshots, pages, PDFs or typed text) that may hold ONE or MANY exam questions, and wrote a note. Your only job: find the questions and decide which ones to analyse.
+const SYSTEM = `You are the intake clerk of the ClinixStudy app (a study app for the NCLEX-RN exam). The student uploaded files (screenshots, pages, PDFs or typed text) that may hold ONE or MANY exam questions, and wrote a note. Your only job: find the questions and decide which ones to analyse.
 
 RULES
 1. Count the real exam questions in the files, in reading order (file 1 first). A case study with several tabs / exhibits / screens that all belong to the same item is ONE question. Cover pages, answer keys, rationales and score screens are not questions.

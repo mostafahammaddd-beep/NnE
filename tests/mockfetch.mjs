@@ -43,7 +43,7 @@ export function installFetch() {
     const text = st.ok;
     const parts = text.match(/.{1,12}/gs) || [""];
     const chunks = isGem
-      ? parts.map((p) => `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: p }] } }] })}\n\n`).concat([`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "" }] }, finishReason: "STOP" }] })}\n\n`])
+      ? parts.map((p) => `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: p }] } }] })}\n\n`).concat([`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "" }] }, finishReason: "STOP", ...(st.grounding ? { groundingMetadata: st.grounding } : {}) }] })}\n\n`])
       : [`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "" } }] })}\n\n`, ...parts.map((p) => `data: ${JSON.stringify({ choices: [{ delta: { content: p } }] })}\n\n`), `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: st.finish || "stop" }] })}\n\n`, "data: [DONE]\n\n"];
     return new Response(sse(chunks, { delay: st.gap || 0, signal }), { status: 200 });
   };

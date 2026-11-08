@@ -31,12 +31,12 @@ export const setSpeechKey = (k) => { _key = k || ""; };
 
 /* ── which voice: "google" (default: fast, unlimited, American, female) or "gemini" (American male, slower, daily quota) ── */
 export const VOICE_ENGINES = ["google", "gemini"];
-let engine = (() => { const v = prefs.get("nclex:voice", "google"); return VOICE_ENGINES.includes(v) ? v : "google"; })();
+let engine = (() => { const v = prefs.get("clinix:voice", "google"); return VOICE_ENGINES.includes(v) ? v : "google"; })();
 const engineSubs = new Set();
 export const getVoiceEngine = () => engine;
 export function setVoiceEngine(v) {
   if (!VOICE_ENGINES.includes(v) || v === engine) return;
-  engine = v; prefs.set("nclex:voice", v); engineSubs.forEach((f) => f());
+  engine = v; prefs.set("clinix:voice", v); engineSubs.forEach((f) => f());
 }
 export const useVoiceEngine = () => useSyncExternalStore((f) => { engineSubs.add(f); return () => engineSubs.delete(f); }, () => engine, () => engine);
 
@@ -64,7 +64,7 @@ export function useSpeechState(id) {
 
 /* ── playback speed (shared by every speaker button, remembered between launches) ── */
 export const SPEEDS = [0.5, 0.75, 1, 1.25];
-let speed = (() => { const v = parseFloat(prefs.get("nclex:speed", "1")); return SPEEDS.includes(v) ? v : 1; })();
+let speed = (() => { const v = parseFloat(prefs.get("clinix:speed", "1")); return SPEEDS.includes(v) ? v : 1; })();
 const speedSubs = new Set();
 export const useSpeed = () =>
   useSyncExternalStore((f) => { speedSubs.add(f); return () => speedSubs.delete(f); }, () => speed, () => speed);
@@ -81,7 +81,7 @@ const inflight = new Map();
 
 export function cycleSpeed() {
   speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
-  prefs.set("nclex:speed", String(speed));
+  prefs.set("clinix:speed", String(speed));
   try { if (el) { el.defaultPlaybackRate = speed; el.playbackRate = speed; } } catch (e) { /* ignore */ }
   try { if (src) src.playbackRate.value = speed; } catch (e) { /* ignore */ }
   speedSubs.forEach((f) => f());
@@ -368,7 +368,7 @@ function systemSpeak(text, my, id) {
 }
 
 const fail = (msg) => {
-  try { window.dispatchEvent(new CustomEvent("nclex:speech-error", { detail: msg })); } catch (e) { /* ignore */ }
+  try { window.dispatchEvent(new CustomEvent("clinix:speech-error", { detail: msg })); } catch (e) { /* ignore */ }
 };
 
 /* play with the Web-Audio fallback (speed works, pitch follows the speed) */

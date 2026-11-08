@@ -34,7 +34,7 @@ export async function saveImageFile(img, marks = []) {
   const svg = img.mime === "image/svg+xml";
   const png = marks.length > 0 || svg;
   const ext = png ? "png" : (img.mime.split("/")[1] || "png").replace("jpeg", "jpg");
-  const name = `nclex-${Date.now()}.${ext}`;
+  const name = `clinix-${Date.now()}.${ext}`;
   try {
     let blob = svg ? await svgToPngBlob(src) : await (await fetch(src)).blob();
     if (marks.length) blob = await inkOnBlob(blob, marks);

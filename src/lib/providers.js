@@ -62,7 +62,7 @@ export const PROVIDER_IDS = Object.keys(PROVIDERS);
 
 /* ── the student's choices ── */
 
-const LS_KEYS = "nclex:xkeys:v1";
+const LS_KEYS = "clinix:xkeys:v1";
 const ENV_KEYS = { groq: ENV.VITE_GROQ_API_KEY, mistral: ENV.VITE_MISTRAL_API_KEY, openrouter: ENV.VITE_OPENROUTER_API_KEY };
 
 export function getExtKeys() {
@@ -84,19 +84,19 @@ export function setExtKeys(obj) {
   _lanes = null;                               // the lane list is rebuilt with the new keys
 }
 
-const LS_PREFS = "nclex:engine:v1";
+const LS_PREFS = "clinix:engine:v1";
 export const ENGINE_MODES = ["auto", "quality", "speed"];
 export function getEnginePrefs() {
   const p = read(LS_PREFS) || {};
-  return { mode: ENGINE_MODES.includes(p.mode) ? p.mode : "auto", slice: p.slice !== false };
+  return { mode: ENGINE_MODES.includes(p.mode) ? p.mode : "auto", slice: p.slice !== false, search: p.search !== false };
 }
 export function setEnginePrefs(next) { write(LS_PREFS, { ...getEnginePrefs(), ...next }); }
 export const getEngineMode = () => getEnginePrefs().mode;
 
 /* ── lanes: discovered from each provider's own model list (cached), never hard-coded to a name that may be renamed tomorrow ── */
 
-const LS_LANES = "nclex:xlanes:v1";
-const LS_DEAD = "nclex:xdead:v1";
+const LS_LANES = "clinix:xlanes:v1";
+const LS_DEAD = "clinix:xdead:v1";
 const LANES_TTL = 3 * 864e5;
 const DEAD_TTL = 5 * 3600e3;
 const tag = (k) => String(k || "").slice(-8);

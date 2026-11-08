@@ -186,6 +186,7 @@ export const HEDGE_MS = {
   ocr: { min: 8000, max: 15000 },
   write: { min: 10000, max: 20000 },
   solve: { min: 15000, max: 30000 },
+  search: { min: 9000, max: 16000 },       // v3.27: an answer that searches first: the first word is later than a plain chat, but a lane that is stuck is still raced early
 };
 
 /* how long to wait for the FIRST sign of life (any streamed part, a thought summary included) before a second lane is started */

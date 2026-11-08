@@ -16,7 +16,7 @@ export function initVocab(raw) {
   state = { map: raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {} };
 }
 
-const emit = () => { subs.forEach((f) => f()); store.set("nclex:vocab", state.map); };
+const emit = () => { subs.forEach((f) => f()); store.set("clinix:vocab", state.map); };
 const sub = (f) => { subs.add(f); return () => subs.delete(f); };
 const snap = () => state;
 

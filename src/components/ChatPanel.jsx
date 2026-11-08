@@ -4,8 +4,14 @@ import Icon from "./Icon.jsx";
 import { RichText } from "./rich.jsx";
 import ExamCard from "./ExamCard.jsx";
 import FontSizer, { ScaledBox } from "./FontSizer.jsx";
+import WaitCard from "./WaitCard.jsx";
+import Sources from "./Sources.jsx";
+import PhotoStrip from "./PhotoStrip.jsx";
+import { fetchPhotos, photosOn as readPhotosOn, setPhotosOn as savePhotosOn, configuredSources } from "../lib/photos.js";
+import { getEnginePrefs, setEnginePrefs } from "../lib/providers.js";
 import { Lightbox, StrokeLayer, inkKey, loadInk, inkOnBlob } from "./ImageInk.jsx";
-import { askChat } from "../lib/chat.js";
+import { askChat, REPLY_LEVELS, DEFAULT_LEVEL, levelOf } from "../lib/chat.js";
+import { stripPending } from "../lib/chatflow.js";
 import { makeExam, wantsExam } from "../lib/exam.js";
 import { splitCites } from "../lib/library.js";
 import { makePicture, restyle, WANTS_AR, WANTS_REDO, WANTS_RESTYLE, ENGINES, getEngine, setEngine } from "../lib/imagegen.js";
@@ -58,7 +64,7 @@ function forStorage(messages) {
     const m = messages[i];
     if (m.img && m.img.data.length <= budget) { keep.add(m.id); budget -= m.img.data.length; }
   }
-  return messages.filter((m) => m.role !== "ai" || m.text || m.img || m.exam || m.err).slice(-60).map(({ id, role, text, atts, img, via, exam, refs, isExam, gen }) => ({ id, role, text, via, exam, refs, isExam, gen, atts: (atts || []).map(({ name, label, t }) => ({ name, label, t })), img: img && keep.has(id) ? img : undefined }));
+  return messages.filter((m) => m.role !== "ai" || m.text || m.img || m.exam || m.err).slice(-60).map(({ id, role, text, atts, img, via, exam, refs, isExam, gen, sources, searched, photos }) => ({ id, role, text, via, exam, refs, isExam, gen, sources, searched, photos: photos && photos.state === "done" && photos.items && photos.items.length ? { state: "done", items: photos.items } : undefined, atts: (atts || []).map(({ name, label, t }) => ({ name, label, t })), img: img && keep.has(id) ? img : undefined }));
 }
 
 function GenImage({ img, via, busy, onRestyle, onTranslate, bank }) {
@@ -114,19 +120,12 @@ function GenImage({ img, via, busy, onRestyle, onTranslate, bank }) {
   );
 }
 
-/* seconds counter while a picture is being drawn: proof that it is alive */
-function Secs() {
-  const [n, setN] = useState(0);
-  useEffect(() => { const t = setInterval(() => setN((v) => v + 1), 1000); return () => clearInterval(t); }, []);
-  return <small className="chat-secs">{n}ث</small>;
-}
-
 /* ── floating-window size (the "AI" window): remembered, never bigger than the screen ── */
 const MIN_W = 340, MIN_H = 380, MARGIN = 12;
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 const PRESETS = { s: { w: 380, h: 520, f: 0.5 }, m: { w: 480, h: 660, f: 0.72 }, l: { w: 760, h: 820, f: 0.92 } };
 function readSize() {
-  try { const r = JSON.parse(prefs.get("nclex:ai:size", "null")); if (r && Number.isFinite(r.w) && Number.isFinite(r.h)) return r; } catch (e) { /* default */ }
+  try { const r = JSON.parse(prefs.get("clinix:ai:size", "null")); if (r && Number.isFinite(r.w) && Number.isFinite(r.h)) return r; } catch (e) { /* default */ }
   return { w: PRESETS.m.w, h: PRESETS.m.h, full: false };
 }
 const useViewport = () => {
@@ -145,7 +144,7 @@ const useViewport = () => {
    Stays mounted (hidden) after the first open so an answer that is still streaming is never lost. */
 export default function ChatPanel({
   open, onClose, apiKey, onNeedKey, ctx, chipIds = [], storeKey, variant = "drawer",
-  library, onOpenItem, title, subtitle, suggestions, placeholder, emptyTitle, emptyText, command,
+  library, onOpenItem, onOpenMistakes, title, subtitle, suggestions, placeholder, emptyTitle, emptyText, command,
 }) {
   const win = variant === "window";
   const [messages, setMessages] = useState([]);
@@ -156,11 +155,24 @@ export default function ChatPanel({
   const [imgMode, setImgMode] = useState(false); // next message → draw a picture
   const [examMode, setExamMode] = useState(false); // next message → build an exam
   const [engine, setEng] = useState(getEngine);   // diagram | gemini
+  /* reply level: which model answers and how hard it thinks (lib/chat.js → REPLY_LEVELS). Remembered; applies to the NEXT message. */
+  const [level, setLevel] = useState(() => { const v = prefs.get("clinix:chat:level", DEFAULT_LEVEL); return REPLY_LEVELS.some((l) => l.id === v) ? v : DEFAULT_LEVEL; });
+  const pickLevel = (id) => { setLevel(id); prefs.set("clinix:chat:level", id); };
+  /* Google Search before every answer (default ON): the answer is built from what is found and its sources are listed under it */
+  const [search, setSearch] = useState(() => getEnginePrefs().search !== false);
+  /* v3.29 · smart photos under the answer (lib/photos.js): the text is sent first, the photos arrive afterwards, only when the answer needs them */
+  const [photoOn, setPhotoOn] = useState(readPhotosOn);
+  const photoRef = useRef(photoOn);
+  photoRef.current = photoOn;
+  const photoCtl = useRef(new Set());
+  const togglePhotos = () => { const v = !photoOn; setPhotoOn(v); savePhotosOn(v); if (v && !configuredSources().length) onNeedKey(); };
+  const toggleSearch = () => { const v = !search; setSearch(v); setEnginePrefs({ search: v }); };
   const [wait, setWait] = useState("");
+  const [stage, setStage] = useState(null);       // what a big answer is doing now: { kind: "plan" } | { kind: "write", n, done }
   const [note, setNote] = useState("");
   const [over, setOver] = useState(false);
   const [size, setSize] = useState(readSize);
-  const [dw, setDw] = useState(() => { const n = parseInt(prefs.get("nclex:chat:dw", "0"), 10); return n >= MIN_W ? n : 0; });   // width of the question drawer (0 = default)
+  const [dw, setDw] = useState(() => { const n = parseInt(prefs.get("clinix:chat:dw", "0"), 10); return n >= MIN_W ? n : 0; });   // width of the question drawer (0 = default)
   const dwRef = useRef(dw);
   dwRef.current = dw;
   const vp = useViewport();
@@ -175,7 +187,7 @@ export default function ChatPanel({
   const libRef = useRef(library);
   libRef.current = library;
   /* which lesson a picture belongs to (the saved question this chat is attached to; the general AI window has none) */
-  const lessonId = storeKey && storeKey !== "nclex:chat:global" ? storeKey.replace(/^nclex:chat:/, "") : GLOBAL_LESSON;
+  const lessonId = storeKey && storeKey !== "clinix:chat:global" ? storeKey.replace(/^clinix:chat:/, "") : GLOBAL_LESSON;
   const lessonTitle = lessonId === GLOBAL_LESSON ? "" : ((((library && library.questions) || []).find((x) => x.id === lessonId) || {}).title || "");
 
   /* ── conversations (v3.25) ──
@@ -222,7 +234,7 @@ export default function ChatPanel({
 
   useEffect(() => { if (!open) { setHistOpen(false); setDelId(null); } }, [open]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => () => { abortRef.current?.abort(); photoCtl.current.forEach((c) => c.abort()); }, []);
 
   /* keep the newest text in view unless the student scrolled up to read */
   useEffect(() => {
@@ -290,12 +302,13 @@ export default function ChatPanel({
     const wantImage = opts.image ?? (imgMode || IMG_INTENT.test(q) || follow);
     const wantExam = !wantImage && (opts.exam ?? (examMode || wantsExam(q)));
     const userMsg = { id: uid(), role: "user", text: q || "(ملفات مرفقة)", atts: atts.map(({ name, label, t }) => ({ name, label, t })) };
-    const ai = { id: uid(), role: "ai", text: "", gen: wantImage, isExam: wantExam };
+    const ai = { id: uid(), role: "ai", text: "", gen: wantImage, isExam: wantExam, lvl: level, t0: Date.now() };
     const history = [...base, userMsg];
     setMessages([...history, ai]);
-    setInput(""); setFiles([]); setNote(""); setImgMode(false); setExamMode(false); setBusy(true); stick.current = true;
+    setInput(""); setFiles([]); setNote(""); setImgMode(false); setExamMode(false); setStage(null); setBusy(true); stick.current = true;
     if (inputRef.current) inputRef.current.style.height = "auto";
     const ctrl = new AbortController();
+    let flushRef = null;                         // paints the last streamed text (set when the answer starts streaming)
     abortRef.current = ctrl;
     const lib = libRef.current || {};
     try {
@@ -332,28 +345,53 @@ export default function ChatPanel({
         }));
       } else {
         let codes = {};
-        const show = (raw2) => {
+        const paint = (raw2) => {
           const { text, cites, claims } = splitCites(raw2);
           const refs = cites.map((c) => (codes[c] ? { ...codes[c], code: c, claim: claims[c] || "" } : null)).filter(Boolean);
           patch(ai.id, (m) => ({ ...m, text: fixText(text), refs }));
         };
+        /* v3.27: while an answer streams (up to 4 sections at once) the screen is repainted at most every 60 ms, not on every network chunk;
+           the final text is always painted at once */
+        let pendingRaw = null, tick = 0;
+        const flush = () => { clearTimeout(tick); tick = 0; if (pendingRaw !== null) { const r = pendingRaw; pendingRaw = null; paint(r); } };
+        const show = (raw2, now) => { pendingRaw = raw2; if (now) flush(); else if (!tick) tick = setTimeout(flush, 60); };
+        flushRef = flush;
         const out = await askChat({
-          apiKey, history, ctx, chipIds, attach: atts, library: lib, signal: ctrl.signal,
-          onCodes: (c) => { codes = c; },
+          apiKey, history, ctx, chipIds, attach: atts, library: lib, signal: ctrl.signal, level,
+          onCodes: (c) => { codes = c; }, onStage: (st) => setStage(st),
           onText: show,
         });
-        show(out.text);
+        show(out.text, true);
+        patch(ai.id, (m) => ({ ...m, sources: out.sources || null, searched: !!out.searchOn }));
+        if (photoRef.current && out.text) runPhotos(ai.id, q, splitCites(out.text).text);
       }
     } catch (err) {
+      if (flushRef) flushRef();                    // what was streamed last is painted before a stop / an error is recorded
       /* an exam that already has some questions keeps them (and stops "loading") when it is stopped or fails half-way */
-      const keep = (m) => (m.exam ? { ...m, exam: { ...m.exam, loading: false, total: m.exam.questions.length } } : m);
+      const keep = (m) => (m.exam ? { ...m, exam: { ...m.exam, loading: false, total: m.exam.questions.length } } : m.text ? { ...m, text: stripPending(m.text) } : m);
       if (err && err.name === "AbortError") patch(ai.id, (m) => ({ ...keep(m), stopped: true }));
       else patch(ai.id, (m) => ({ ...keep(m), err: (err && err.message) || "حصلت مشكلة. جرّب تاني." }));
     } finally {
       if (abortRef.current === ctrl) abortRef.current = null;
-      setWait(""); setBusy(false);
+      if (flushRef) flushRef();
+      setWait(""); setStage(null); setBusy(false);
     }
-  }, [input, files, busy, apiKey, messages, imgMode, examMode, engine, ctx, chipIds, onNeedKey]);
+  }, [input, files, busy, apiKey, messages, imgMode, examMode, engine, level, ctx, chipIds, onNeedKey]);
+
+  /* runs after the text answer is complete; never blocks it. Any failure just means "no photos". */
+  const runPhotos = (aiId, question, answer) => {
+    const ctrl = new AbortController();
+    photoCtl.current.add(ctrl);
+    const merge = (p) => patch(aiId, (m) => ({ ...m, photos: p === null ? undefined : { ...(m.photos || {}), ...p } }));
+    fetchPhotos({
+      apiKey, question, answer, signal: ctrl.signal,
+      ctxHint: ctx.kind === "global" ? "" : String(ctx.question || "").slice(0, 120),
+      onStart: (n) => merge({ state: "loading", total: n, items: [] }),
+      onUpdate: (items, o) => merge({ state: o && o.final ? "done" : "loading", items }),
+    }).then((r) => merge(r.status === "done" ? { state: "done", items: r.items } : null))
+      .catch(() => merge(null))
+      .finally(() => photoCtl.current.delete(ctrl));
+  };
 
   const stop = () => abortRef.current?.abort();
 
@@ -376,14 +414,17 @@ export default function ChatPanel({
     if (!clean.length) return Promise.resolve();
     return queue(() => saveConv(storeKey, id, clean)).then((idx) => { if (idx) setConvs(idx); });
   };
-  const leave = async () => { abortRef.current?.abort(); await flush(); };
-  const newChat = async () => {
+  const leave = async () => { abortRef.current?.abort(); photoCtl.current.forEach((c) => c.abort()); await flush(); };
+  const newChatRef = useRef(null);
+  const newChat = async (o) => {
     setHistOpen(false);
-    if (!messagesRef.current.length) { setTimeout(() => inputRef.current?.focus(), 60); return; }
+    const keep = o && o.keepFocus;
+    if (!messagesRef.current.length) { if (!keep) setTimeout(() => inputRef.current?.focus(), 60); return; }
     await leave();
-    loadedRef.current = null; setMessages([]); setConvId(null); resetComposer();
-    setTimeout(() => inputRef.current?.focus(), 60);
+    loadedRef.current = null; messagesRef.current = []; convIdRef.current = null; setMessages([]); setConvId(null); resetComposer();
+    if (!keep) setTimeout(() => inputRef.current?.focus(), 60);
   };
+  newChatRef.current = newChat;
   const openConv = async (id) => {
     setHistOpen(false);
     if (id === convIdRef.current) return;
@@ -428,7 +469,8 @@ export default function ChatPanel({
     }
   };
 
-  /* another part of the app asks this chat to do something ("امتحني في الموضوع ده"): { id, text, send, exam } */
+  /* another part of the app asks this chat to do something ("امتحني في الموضوع ده"): { id, text, send, exam }.
+     v3.28: it always starts a NEW conversation (the old one stays in the history) instead of continuing the last one. */
   const sendRef = useRef(send);
   sendRef.current = send;
   const handled = useRef(null);
@@ -436,9 +478,16 @@ export default function ChatPanel({
     if (!command || !open || handled.current === command.id) return;
     handled.current = command.id;
     setHistOpen(false);
-    if (command.send) sendRef.current(command.text, command.exam ? { exam: true } : {});
-    else { setInput(command.text || ""); setExamMode(!!command.exam); setTimeout(() => inputRef.current?.focus(), 60); }
-  }, [command, open]);
+    (async () => {
+      const fresh = !!(storeKey && messagesRef.current.length);
+      if (fresh) {
+        await newChatRef.current({ keepFocus: true });                   // saves the open conversation, then clears the screen
+        await new Promise((r) => setTimeout(r, 120));                    // let React redraw so `send` sees the empty chat and a finished (aborted) answer
+      }
+      if (command.send) sendRef.current(command.text, { base: [], ...(command.exam ? { exam: true } : {}) });
+      else { setInput(command.text || ""); setExamMode(!!command.exam); setTimeout(() => inputRef.current?.focus(), 60); }
+    })();
+  }, [command, open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* an exam card changed (answer picked, next question …) → saved with the message */
   /* same content, new look: instant, no model call */
@@ -453,6 +502,13 @@ export default function ChatPanel({
     return { ...m, exam: { ...exam, questions, total: cur ? cur.total : exam.total, loading: cur ? cur.loading : exam.loading } };
   });
 
+  /* «غلطاتي» from an exam card: same hand-over as a source chip (a modal chat closes first and its history entry is reused) */
+  const openMistakes = () => {
+    const modal = pushed.current;
+    if (modal) { pushed.current = false; onClose(); }
+    if (onOpenMistakes) onOpenMistakes(modal);
+  };
+
   /* a source chip: open that saved question. Closing first when the chat is modal (drawer / phone sheet) and reusing its history entry. */
   const openItem = (id, claim) => {
     const modal = pushed.current;
@@ -466,7 +522,7 @@ export default function ChatPanel({
   const winStyle = !win ? (!mobile && dw ? { width: clamp(dw, MIN_W, maxW) } : undefined) : mobile
     ? { height: size.full ? vp.h : clamp(size.h > vp.h ? PRESETS.m.f * vp.h : size.h, 300, vp.h - 6) }
     : { width: size.full ? maxW : clamp(size.w, MIN_W, maxW), height: size.full ? maxH : clamp(size.h, MIN_H, maxH) };
-  const persistSize = (z) => { setSize(z); prefs.set("nclex:ai:size", JSON.stringify(z)); };
+  const persistSize = (z) => { setSize(z); prefs.set("clinix:ai:size", JSON.stringify(z)); };
   const preset = (k) => persistSize(mobile ? { w: size.w, h: Math.round(vp.h * PRESETS[k].f), full: false } : { w: PRESETS[k].w, h: PRESETS[k].h, full: false });
   const toggleFull = () => persistSize({ ...size, full: !size.full });
   const startDrag = (mode) => (e) => {
@@ -484,7 +540,7 @@ export default function ChatPanel({
     dragRef.current = { mode: "dw", x: e.clientX, w: el.getBoundingClientRect().width, rtl: getComputedStyle(el).direction === "rtl" };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
-  const resetDw = () => { setDw(0); prefs.set("nclex:chat:dw", "0"); };
+  const resetDw = () => { setDw(0); prefs.set("clinix:chat:dw", "0"); };
   const moveDrag = (e) => {
     const d = dragRef.current;
     if (!d) return;
@@ -498,8 +554,8 @@ export default function ChatPanel({
     const d = dragRef.current;
     if (!d) return;
     dragRef.current = null;
-    if (d.mode === "dw") prefs.set("nclex:chat:dw", String(dwRef.current));
-    else prefs.set("nclex:ai:size", JSON.stringify(sizeRef.current));
+    if (d.mode === "dw") prefs.set("clinix:chat:dw", String(dwRef.current));
+    else prefs.set("clinix:ai:size", JSON.stringify(sizeRef.current));
   };
   const sizeKey = size.full ? "full" : null;
 
@@ -554,7 +610,7 @@ export default function ChatPanel({
             <Icon name="clock" size={16} /> السجل{convs.length > 0 && <small>{convs.length}</small>}
           </button>
           <span className="chat-bar-title" dir="auto">{histOpen ? "سجل المحادثات" : ((convs.find((c) => c.id === convId) || {}).title || (messages.length ? convTitle(messages) : "محادثة جديدة"))}</span>
-          <button type="button" className="chat-bar-btn chat-bar-new" onClick={newChat} title="ابدأ محادثة جديدة (القديمة بتفضل في السجل)">
+          <button type="button" className="chat-bar-btn chat-bar-new" onClick={() => newChat()} title="ابدأ محادثة جديدة (القديمة بتفضل في السجل)">
             <Icon name="plus" size={16} stroke={3} /> جديدة
           </button>
         </div>
@@ -562,7 +618,7 @@ export default function ChatPanel({
 
       {histOpen && (
         <div className="chat-hist" role="list" aria-label="سجل المحادثات">
-          <button type="button" className="btn btn-teal btn-sm chat-hist-new" onClick={newChat}><Icon name="plus" size={16} stroke={3} /> محادثة جديدة</button>
+          <button type="button" className="btn btn-teal btn-sm chat-hist-new" onClick={() => newChat()}><Icon name="plus" size={16} stroke={3} /> محادثة جديدة</button>
           {convs.length === 0 && <p className="chat-hist-empty">لسه مفيش محادثات محفوظة. أول رسالة تبعتها هتتسجّل هنا.</p>}
           {convs.map((c) => (
             <div key={c.id} className="chat-hist-row" role="listitem" data-on={c.id === convId}>
@@ -606,9 +662,15 @@ export default function ChatPanel({
                 {m.img && <GenImage img={m.img} via={m.via} busy={busy} bank={{ lessonId, lessonTitle, caption: (m.img.spec && (m.img.spec.ar || m.img.spec.title)) || (messages[mi - 1] && messages[mi - 1].role === "user" ? messages[mi - 1].text : "") }} onRestyle={() => restyleMsg(m.id)} onTranslate={() => send("أعد إنشاء الصورة وحط تحت كل سطر إنجليزي الترجمة العربي", { image: true })} />}
                 {(m.text || m.exam) && <div className="chat-fs"><FontSizer id={`chat:${m.id}`} label="حجم خط الرد" /></div>}
                 {m.text && <Rich text={m.text} />}
-                {m.exam && <ExamCard exam={m.exam} busy={busy} onChange={(ex) => setExam(m.id, ex)} onAsk={(t, o) => send(t, o)} />}
+                {m.role === "ai" && m.photos && <PhotoStrip photos={m.photos} />}
+                {m.role === "ai" && m.text && <Sources sources={m.sources} searched={m.searched} text={m.text} busy={busy && mi === messages.length - 1} />}
+                {/* a big answer shows each section as soon as it is ready; the waiting card stays under it until the last one is done */}
+                {m.text && busy && mi === messages.length - 1 && stage && stage.kind === "write" && stage.done < stage.n && (
+                  <WaitCard kind="text" level={m.lvl || "balanced"} stage={stage} since={m.t0} />
+                )}
+                {m.exam && <ExamCard exam={m.exam} busy={busy} onOpenMistakes={onOpenMistakes ? openMistakes : undefined} onChange={(ex) => setExam(m.id, ex)} onAsk={(t, o) => send(t, o)} />}
                 {!m.text && !m.exam && !m.err && !m.stopped && !m.img && (
-                  <span className="chat-typing">{m.gen ? (wait || "بيرسم الصورة") : m.isExam ? (wait || "بيجهّز الامتحان") : "بيفكّر"}<i /><i /><i />{(m.gen || m.isExam) && <Secs />}</span>
+                  <WaitCard kind={m.gen ? "image" : m.isExam ? "exam" : "text"} level={m.lvl || "balanced"} stage={busy && mi === messages.length - 1 ? stage : null} label={m.gen || m.isExam ? wait : ""} since={m.t0} search={search} />
                 )}
                 {m.refs && m.refs.length > 0 && (
                   <div className="chat-refs">
@@ -653,6 +715,35 @@ export default function ChatPanel({
               {e.label}<small>{e.hint}</small>
             </button>
           ))}
+        </div>
+      )}
+
+      {!imgMode && !examMode && (
+        <div className="chat-level">
+          <div className="chat-level-head">
+            <b>مستوى الرد</b>
+            <small>{levelOf(level).wait}</small>
+          </div>
+          <div className="chat-level-seg" role="radiogroup" aria-label="مستوى الرد">
+            {REPLY_LEVELS.map((l, i) => (
+              <button key={l.id} type="button" role="radio" aria-checked={level === l.id} data-on={level === l.id} title={`${l.hint} · الوقت المتوقع: ${l.wait}`} onClick={() => pickLevel(l.id)}>
+                {l.label}
+                <span className="lv-dots" aria-hidden="true">{REPLY_LEVELS.map((_, j) => <i key={j} data-f={j <= i ? "1" : "0"} />)}</span>
+              </button>
+            ))}
+          </div>
+          <p className="chat-level-note">{levelOf(level).hint} كل ما زاد المستوى زادت الدقة وزاد وقت الانتظار.</p>
+          <button type="button" className="chat-search" data-on={search} aria-pressed={search} onClick={toggleSearch}
+            title={search ? "الرد بيتبني على نتايج بحث، ومصادره بتظهر تحته" : "الرد من غير بحث ولا مصادر"}>
+            🔎 {search ? "بيبحث قبل ما يرد · المصادر تحت الرد" : "البحث مقفول · الرد من غير مصادر"}
+          </button>
+          <button type="button" className="chat-search" data-on={photoOn} aria-pressed={photoOn} onClick={togglePhotos}
+            title={photoOn ? "لو الرد محتاج توضيح بصري بتظهر تحته صور (5 كحد أقصى) بعد ما النص يوصل" : "الرد نص بس، من غير صور"}>
+            🖼️ {photoOn ? "صور توضيحية تلقائية · لما الرد يحتاجها" : "الصور مقفولة · الرد نص بس"}
+          </button>
+          {photoOn && !configuredSources().length && (
+            <button type="button" className="chat-photos-hint" onClick={onNeedKey}>ضيف مفتاح مصدر صور واحد على الأقل (Google / Unsplash / Pexels) من 🔑</button>
+          )}
         </div>
       )}
 

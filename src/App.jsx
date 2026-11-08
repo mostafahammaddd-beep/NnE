@@ -10,6 +10,8 @@ import WordPop from "./components/WordPop.jsx";
 import TopicScreen from "./screens/TopicScreen.jsx";
 import ChatPanel from "./components/ChatPanel.jsx";
 import ImageGallery from "./components/ImageGallery.jsx";
+import MistakesScreen from "./screens/MistakesScreen.jsx";
+import { useMistakes, openCount, loadMistakes } from "./lib/mistakes.js";
 import { useBank } from "./lib/imagebank.js";
 import MoveModal from "./components/MoveModal.jsx";
 import { removeWord, vocabKey } from "./lib/vocab.js";
@@ -25,6 +27,8 @@ import { setSpeechKey, stopSpeaking } from "./lib/speech.js";
 import { setTranslateKey } from "./lib/wordtr.js";
 import { GOALS } from "./lib/config.js";
 import { hideSplash } from "./lib/splash.js";
+import { LinkCtx, LINK_HL_MS } from "./lib/linkctx.js";
+import { clearFlash } from "./lib/highlight.js";
 
 const AI_CTX = { kind: "global", question: "", explanation: "" };
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -71,7 +75,7 @@ export default function App({ boot }) {
   /* v3.25: questions and explanations have their own topics. Topics saved by an older version are sorted by kind once (a mixed topic is split in two). */
   const [topics, setTopics] = useState(() => {
     const t = splitByKind(boot.topics, boot.questions);
-    if (t !== boot.topics) store.set("nclex:topics", t);
+    if (t !== boot.topics) store.set("clinix:topics", t);
     return t;
   });
   const [org, setOrg] = useState({ busy: false, done: 0, total: 0, err: "" });
@@ -95,6 +99,8 @@ export default function App({ boot }) {
   tRef.current = topics;
   const [showBackup, setShowBackup] = useState(false);
   const galleryCount = useBank().length;
+  const mistakeCount = openCount(useMistakes().list);
+  useEffect(() => { loadMistakes(); }, []);
   const keyRef = useRef(apiKey);
   keyRef.current = apiKey;
   const orgCtl = useRef(null);
@@ -106,7 +112,7 @@ export default function App({ boot }) {
     const next = fn(tRef.current);
     tRef.current = next;
     setTopics(next);
-    store.set("nclex:topics", next);
+    store.set("clinix:topics", next);
     return next;
   };
   const validIds = () => new Set(qRef.current.map((q) => q.id));
@@ -167,7 +173,7 @@ export default function App({ boot }) {
     const next = theme === "dark" ? "light" : "dark";
     setTheme(next);
     document.documentElement.dataset.theme = next;
-    prefs.set("nclex:theme", next);
+    prefs.set("clinix:theme", next);
     const m = document.querySelector('meta[name="theme-color"]');
     if (m) m.setAttribute("content", next === "dark" ? "#0A1120" : "#F3F7FB");
   };
@@ -190,8 +196,8 @@ export default function App({ boot }) {
   useEffect(() => { setSpeechKey(apiKey); setTranslateKey(apiKey); }, [apiKey]);
   useEffect(() => {
     const h = (e) => sayRef.current(e.detail);
-    window.addEventListener("nclex:speech-error", h);
-    return () => window.removeEventListener("nclex:speech-error", h);
+    window.addEventListener("clinix:speech-error", h);
+    return () => window.removeEventListener("clinix:speech-error", h);
   }, []);
   useEffect(() => { stopSpeaking(); }, [view]);
 
@@ -216,7 +222,7 @@ export default function App({ boot }) {
     const key = (k || "").trim();
     syncUsageKey(key || ENV_KEY);                       // a new key starts a fresh usage counter
     setApiKey(key || ENV_KEY);
-    await store.set("nclex:apikey", key);
+    await store.set("clinix:apikey", key);
     setShowKey(false);
     say(key ? "اتحفظ المفتاح 🔑" : "اتمسح المفتاح");
   };
@@ -224,14 +230,14 @@ export default function App({ boot }) {
   const cycleGoal = async () => {
     const next = GOALS[(Math.max(0, GOALS.indexOf(goal)) + 1) % GOALS.length];
     setGoal(next);
-    await store.set("nclex:goal", next);
+    await store.set("clinix:goal", next);
   };
 
   const onLearn = useCallback((task, modeId, ms, chars) => {
     const next = learn(perfRef.current, task, modeId, ms, chars);
     perfRef.current = next;
     setPerf(next);
-    store.set("nclex:perf", next);
+    store.set("clinix:perf", next);
   }, []);
 
   /* Auto-save, called by the editor (it never navigates away).
@@ -245,10 +251,10 @@ export default function App({ boot }) {
     if (!existing || imageChanged) {
       if (imageUrl) {
         try { thumb = await resizeDataUrl(imageUrl, 360, 0.6); } catch (e) { /* keep old thumb */ }
-        const ok = await store.set(`nclex:img:${id}`, { data: imageUrl, doc: doc || null });
+        const ok = await store.set(`clinix:img:${id}`, { data: imageUrl, doc: doc || null });
         if (!ok) say("الصورة كبيرة والتخزين ممتلئ، اتحفظ النص بس");
       } else {
-        await store.del(`nclex:img:${id}`);
+        await store.del(`clinix:img:${id}`);
         thumb = null;
       }
     }
@@ -270,7 +276,7 @@ export default function App({ boot }) {
 
     qRef.current = nextQ; wRef.current = nextW;
     setQuestions(nextQ); setWords(nextW);
-    await Promise.all([store.set("nclex:questions", nextQ), store.set("nclex:words", nextW)]);
+    await Promise.all([store.set("clinix:questions", nextQ), store.set("clinix:words", nextW)]);
     if (!existing && !silent) {   // only the first save speaks; later silent updates (edits) don't pop a message each time
       const base = lines.length ? `اتحفظ تلقائي ✅ عندك ${lines.length} كلمة جديدة، صنّف المهم منها ⭐` : "اتحفظ السؤال تلقائي ✅";
       if (cheer.confetti) celebrate();
@@ -285,7 +291,7 @@ export default function App({ boot }) {
     qRef.current = nextQ; wRef.current = nextW;
     setQuestions(nextQ); setWords(nextW);
     commitTopics((cur) => dropItem(cur, id));
-    await Promise.all([store.set("nclex:questions", nextQ), store.set("nclex:words", nextW), store.del(`nclex:img:${id}`), removeAllConvs(`nclex:chat:${id}`)]);
+    await Promise.all([store.set("clinix:questions", nextQ), store.set("clinix:words", nextW), store.del(`clinix:img:${id}`), removeAllConvs(`clinix:chat:${id}`)]);
     say("اتحذف السؤال");
     back();
   };
@@ -298,15 +304,41 @@ export default function App({ boot }) {
       .map((w) => ({ ...w, text: wordLines(w.text).filter((l) => vocabKey(parseWord(l).term) !== k).join("\n") }))
       .filter((w) => w.text.trim());
     wRef.current = nextW; setWords(nextW);
-    await store.set("nclex:words", nextW);
+    await store.set("clinix:words", nextW);
     say("اتحذفت الكلمة");
   };
 
   const clearLegacyWords = async () => {
     wRef.current = []; setWords([]);
-    await store.set("nclex:words", []);
+    await store.set("clinix:words", []);
     say("اتمسحت الكلمات القديمة");
   };
+
+  /* a yellow link chip was tapped: open the earlier question (highlight 20 s) and remember where to come back to.
+     `fromId` = the question the student is leaving (the Editor knows it even before the URL does). */
+  const openLinked = (target, claim, fromId) => {
+    const cur = viewRef.current;
+    const selfId = fromId || (cur.name === "edit" ? cur.id : null);
+    const from = selfId ? qRef.current.find((x) => x.id === selfId) : null;
+    const y = window.scrollY;
+    if (selfId && cur.name === "edit") window.history.replaceState({ v: { ...cur, id: selfId, hl: null } }, "");   // coming back reopens THIS question (also one that was saved a moment ago)
+    go({ name: "edit", id: target.id, hl: { text: claim, nonce: Date.now(), ms: LINK_HL_MS }, ...(selfId ? { ret: { id: selfId, y, title: (from && from.title) || "" } } : {}) });
+  };
+  /* "عد للسؤال الأصلي": one step back in the history (the original question is the entry before this one), then its scroll position */
+  const returnToOrigin = () => {
+    const r = viewRef.current && viewRef.current.ret;
+    if (!r) return;
+    clearFlash();
+    window.history.back();
+    const fix = () => window.scrollTo({ top: r.y });
+    setTimeout(() => {
+      const v = viewRef.current;
+      if (!(v && v.name === "edit" && v.id === r.id)) go({ name: "edit", id: r.id }, true);   // the history did not land on it → open it directly
+      setTimeout(fix, 60);
+    }, 260);
+    setTimeout(fix, 500);
+  };
+  const linkCtx = React.useMemo(() => ({ questions, selfId: view.name === "edit" ? view.id || null : null, open: openLinked }), [questions, view]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const openItem = (id, replace, hl) => go({ name: "edit", id, ...(hl && hl.text ? { hl } : {}) }, !!replace);
   const openAI = (cmd) => {
@@ -321,6 +353,7 @@ export default function App({ boot }) {
   const editing = view.name === "edit" && view.id ? questions.find((q) => q.id === view.id) : null;
 
   return (
+    <LinkCtx.Provider value={linkCtx}>
     <div className="app" dir="rtl" data-sub={view.name !== "home"}>
       <div className="paper" aria-hidden="true" />
 
@@ -339,6 +372,9 @@ export default function App({ boot }) {
             <button onClick={() => (view.name === "gallery" ? back() : go({ name: "gallery" }))} aria-label="معرض الصور" title="معرض الصور" className="iconbtn iconbtn-badge" data-on={view.name === "gallery"}>
               <Icon name="images" size={19} />{galleryCount > 0 && <i>{galleryCount > 99 ? "99+" : galleryCount}</i>}
             </button>
+            <button onClick={() => (view.name === "mistakes" ? back() : go({ name: "mistakes" }))} aria-label="غلطاتي" title="غلطاتي" className="iconbtn iconbtn-badge iconbtn-mist" data-on={view.name === "mistakes"}>
+              <Icon name="bookX" size={19} />{mistakeCount > 0 && <i>{mistakeCount > 99 ? "99+" : mistakeCount}</i>}
+            </button>
             <button onClick={toggleTheme} aria-label={theme === "dark" ? "الوضع النهاري" : "الوضع الليلي"} className="iconbtn">
               <Icon name={theme === "dark" ? "sun" : "moon"} size={19} />
             </button>
@@ -356,7 +392,7 @@ export default function App({ boot }) {
             onAdd={() => go({ name: "edit", kind: "question" })} onAddLesson={() => go({ name: "edit", kind: "lesson" })} onWords={() => go({ name: "words" })}
             onOpen={(id) => go({ name: "edit", id })}
             topics={topics} org={org} onOrganize={(full, kind) => runOrganize(full, true, kind)} onAuto={(v) => commitTopics((c) => ({ ...c, auto: v }))}
-            onOpenTopic={(id) => go({ name: "topic", id })} />
+            onOpenTopic={(id) => go({ name: "topic", id })} onMistakes={() => go({ name: "mistakes" })} />
         ) : view.name === "topic" ? (
           topicView ? (
             <TopicScreen key={topicView.id} topic={topicView} questions={questions} apiKey={apiKey} onNeedKey={() => setShowKey(true)}
@@ -365,6 +401,8 @@ export default function App({ boot }) {
               onDelete={() => { commitTopics((c) => dropTopic(c, topicView.id)); say("اتفكّ الموضوع، والأسئلة رجعت من غير موضوع"); back(); }}
               onSaveOverview={(text, sig) => commitTopics((c) => renameTopic(c, topicView.id, { overview: text, overviewSig: sig }))} />
           ) : <div className="page"><div className="card empty"><b>الموضوع ده مش موجود</b><button className="btn btn-teal" onClick={() => go({ name: "home" }, true)}>الرئيسية</button></div></div>
+        ) : view.name === "mistakes" ? (
+          <MistakesScreen onAsk={(text, o) => openAI({ text, send: true, ...(o || {}) })} onHome={() => go({ name: "home" }, true)} />
         ) : view.name === "gallery" ? (
           <ImageGallery questions={questions} topics={topics} onOpen={(id) => go({ name: "edit", id })} />
         ) : view.name === "words" ? (
@@ -380,16 +418,25 @@ export default function App({ boot }) {
 
       {aiEver && (
         <ChatPanel variant="window" open={aiOpen} onClose={() => setAiOpen(false)} apiKey={apiKey} onNeedKey={() => setShowKey(true)}
-          ctx={AI_CTX} chipIds={[]} storeKey="nclex:chat:global" command={aiCmd} onOpenItem={openItem}
+          ctx={AI_CTX} chipIds={[]} storeKey="clinix:chat:global" command={aiCmd} onOpenItem={openItem}
+          onOpenMistakes={(replace) => go({ name: "mistakes" }, !!replace)}
           library={{ questions, topics, focusId: view.name === "edit" ? view.id : null, focusTopicId: view.name === "topic" ? view.id : null }} />
       )}
       {moveQ && <MoveModal title={moveQ.title} topics={{ ...topics, list: topics.list.filter((t) => t.kind === kindOf(moveQ)) }} kind={kindOf(moveQ)} currentId={(topics.list.find((t) => t.qids.includes(moveQ.id)) || {}).id} onPick={(t) => moveTo(moveQ.id, t)} onClose={() => setMoveFor(null)} />}
       <WordPop />
       {showBackup && <BackupModal onClose={() => setShowBackup(false)} />}
       {showKey && <KeyModal current={apiKey === ENV_KEY ? "" : apiKey} hasEnv={!!ENV_KEY} onSave={saveKey} onClose={() => setShowKey(false)} />}
+      {view.name === "edit" && view.ret && (
+        <div className="ret-bar">
+          <button type="button" className="ret-btn" onClick={returnToOrigin} title={view.ret.title || undefined}>
+            <Icon name="back" size={16} stroke={2.6} /> عد للسؤال الأصلي
+          </button>
+        </div>
+      )}
       <Toast msg={toast} />
       <Credit />
       {burst > 0 && <Confetti key={burst} />}
     </div>
+    </LinkCtx.Provider>
   );
 }
