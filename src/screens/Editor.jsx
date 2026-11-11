@@ -19,6 +19,8 @@ import { detectQuestions, runBatch, focusNote } from "../lib/batch.js";
 import { bestField } from "../lib/library.js";
 import { flashPassage, clearFlash } from "../lib/highlight.js";
 import { LinkCtx, useLinks } from "../lib/linkctx.js";
+import { describe as describeLat } from "../lib/latency.js";
+import { quotaNote } from "../lib/quota.js";
 
 const TASK_OF = { original_question_text: "ocr", new_words: "words", explanation: "reason", tricks: "reason" };
 const NULLS = { original_question_text: null, new_words: null, explanation: null, tricks: null };
@@ -541,6 +543,11 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
     timing.words && `كلمات ${sec1(timing.words.ms)}`,
     !isLesson && timing.reason?.stages && (timing.reason.stages.total !== undefined ? `حلّ ${timing.reason.stages.solve}ث · شرح وتريكات ${timing.reason.stages.total}ث` : `حلّ ${timing.reason.stages.solve}ث · أساس ${timing.reason.stages.a}ث · تفصيص ${timing.reason.stages.b}ث`),
   ].filter(Boolean).join(" · ");
+  /* v3.32: the slowest stage, explained (latency.js): lost time (retries / 503 / timeouts) · waiting · thinking · writing. Only when there is something to explain. */
+  const STAGE_AR = { ocr: "القراءة", words: "الكلمات", reason: isLesson ? "الشرح" : "التفصيص" };
+  const slow = ["ocr", "words", "reason"].map((k) => ({ k, lat: timing[k] && timing[k].lat })).filter((x) => x.lat && x.lat.totalMs >= 15000).sort((a, b) => b.lat.totalMs - a.lat.totalMs)[0];
+  const qNote = quotaNote(apiKey);          // v3.33: which models finished their free daily quota and when they come back (empty when everything is fine)
+  const latLine = slow ? `أبطأ مرحلة (${STAGE_AR[slow.k]}): ${describeLat(slow.lat)}` : "";
   const errCount = Object.values(status).filter((s) => s === "error").length;
 
   /* link chips inside this question: tell the App which question the student is leaving (the saved id, even before the URL knows it) */
@@ -650,6 +657,8 @@ export default function Editor({ initial, history, kind: kindProp, boot, apiKey,
                 {errCount ? "خلص، بس جزء فيه مشكلة (تحت)" : lastRun.stopped ? "اتوقف التحليل قبل ما يخلص" : `خلص التحليل في ${lastRun.sec} ث`}
                 {usedModels && <small>{usedModels}</small>}
                 {timingLine && <small style={{ width: "100%", marginInlineStart: 0, direction: "rtl", textAlign: "start", opacity: .85 }}>⏱ {timingLine}</small>}
+                {latLine && <small style={{ width: "100%", marginInlineStart: 0, direction: "rtl", textAlign: "start", opacity: .85 }}>🔎 {latLine}</small>}
+                {qNote && <small style={{ width: "100%", marginInlineStart: 0, direction: "rtl", textAlign: "start", opacity: .85 }}>⏳ {qNote}</small>}
               </div>
             )}
             {sections.map((s) => {

@@ -23,6 +23,24 @@ export const __setClock = (fn) => { _now = typeof fn === "function" ? fn : () =>
 /* generation number of a Gemini model id: gemini-3.8-flash → 3.8 ; "-latest" aliases have none → treated as newest */
 export const genOf = (n) => { const v = (String(n).match(/gemini-(\d+(?:\.\d+)?)/) || [])[1]; return v ? parseFloat(v) : 99; };
 
+/* v3.35 · the three sizes of Gemini model. Their daily quotas are separate, which is what the key ring relies on (keyring.js).
+     weak = Flash-Lite (cheapest) · mid = Flash · strong = Pro (the one worth saving) */
+export const tierOf = (model) => (/lite/.test(model) ? "weak" : /pro/.test(model) ? "strong" : "mid");
+const TIER_ORDER = { weak: 0, mid: 1, strong: 2 };
+/* easy jobs: the weakest model first, then the middle one, the strongest only as a last resort (the order inside a tier is kept) */
+export const weakFirst = (models) => [...new Set(models || [])].map((m, i) => ({ m, i })).sort((a, b) => TIER_ORDER[tierOf(a.m)] - TIER_ORDER[tierOf(b.m)] || a.i - b.i).map((x) => x.m);
+/* the caller's model list cut into one group per tier, in the order the tiers first appear in the list: [{ tier, models }] */
+export function tierStages(models) {
+  const out = [];
+  for (const m of [...new Set(models || [])]) {
+    const t = tierOf(m);
+    let g = out.find((x) => x.tier === t);
+    if (!g) { g = { tier: t, models: [] }; out.push(g); }
+    g.models.push(m);
+  }
+  return out;
+}
+
 export function geminiLane(model) {
   const kind = /pro/.test(model) ? "pro" : /lite/.test(model) ? "lite" : "flash";
   return { id: `gemini:${model}`, provider: "gemini", model, kind, gen: genOf(model), vision: true, pdf: true, maxTokens: 900000 };
@@ -33,7 +51,7 @@ export function geminiLane(model) {
 const S = new Map();
 const st = (id) => {
   let s = S.get(id);
-  if (!s) { s = { inflight: 0, coolUntil: 0, fails: 0, deadUntil: 0, ttft: 0, ok: 0, learnedMax: 0 }; S.set(id, s); }
+  if (!s) { s = { inflight: 0, coolUntil: 0, fails: 0, deadUntil: 0, ttft: 0, ok: 0, learnedMax: 0, bias: 0 }; S.set(id, s); }
   return s;
 };
 export const __resetRouter = () => S.clear();
@@ -68,6 +86,17 @@ export function noteBusy(id, { status = 0, retryAfterMs = 0 } = {}) {
   s.coolUntil = _now() + Math.round(span);
 }
 
+/* v3.33 · the quota ledger (quota.js) knows this lane is at its per-minute wall for exactly `ms`: cool it for that long, WITHOUT counting a failure
+   (a failure would double the next cool-down and push the lane down the ranking for something that was not its fault). Never shortens a longer cool-down. */
+export function coolFor(id, ms) {
+  if (!(ms > 0)) return;
+  const s = st(id);
+  s.coolUntil = Math.max(s.coolUntil, _now() + Math.round(ms));
+}
+
+/* v3.33 · a nudge in loadScore points (0 = none): between equal lanes the one with more daily quota left goes first */
+export function setBias(id, points) { st(id).bias = Number(points) > 0 ? Number(points) : 0; }
+
 /* a lane let a hedge start (it sent nothing for a long time): until it proves itself again, equal lanes are preferred over it */
 export function noteSlow(id, ms) {
   const s = st(id);
@@ -77,6 +106,11 @@ export function noteSlow(id, ms) {
 /* forget "dead" marks (a fresh model list gives temporary failures a new chance) — only lanes whose id starts with `prefix` */
 export function clearDead(prefix = "") {
   for (const [id, s] of S) if (id.startsWith(prefix)) s.deadUntil = 0;
+}
+
+/* v3.34 · the key changed (the key ring moved to the next key): the "asleep" marks of the lanes were earned by the OLD key, so they are forgotten. */
+export function clearCool(prefix = "") {
+  for (const [id, s] of S) if (id.startsWith(prefix)) { s.coolUntil = 0; s.fails = 0; }
 }
 
 /* a lane cannot answer for hours (404 · retired · daily quota · bad key) */
@@ -127,7 +161,7 @@ export function estimateTokens(system, parts, maxOut = 0) {
 const loadScore = (lane, index) => {
   const s = st(lane.id);
   const cool = s.coolUntil > _now() ? 1000 + (s.coolUntil - _now()) / 1000 : 0;
-  return cool + s.inflight * 10 + s.fails * 4 + Math.min(8, s.ttft / 2500) + index * 2;
+  return cool + s.inflight * 10 + s.fails * 4 + Math.min(8, s.ttft / 2500) + index * 2 + (s.bias || 0);
 };
 
 /* same kind and (almost) same generation → interchangeable for quality purposes */
@@ -165,7 +199,10 @@ export function planLanes({ geminiModels, extLanes = [], cls = "write", mode = "
   ordered = ordered.filter((l) => !isDead(l.id) || ordered.every((x) => isDead(x.id)));
 
   /* 2 · external lanes that can really take this request */
-  const ext = extLanes.filter((l) => fits(l, { media, tokens }));
+  const fitting = extLanes.filter((l) => fits(l, { media, tokens }));
+  /* v3.34 · PAID engines (ChatGPT, Claude) are a safety net, not a racer: they come after every other lane and are never used to hedge, so a key with real money
+     behind it is only spent when the free lanes cannot answer */
+  const ext = fitting.filter((l) => !l.paid), paid = fitting.filter((l) => l.paid);
 
   const interactive = cls === "chat" || cls === "quick";
   let lanes;
@@ -175,7 +212,7 @@ export function planLanes({ geminiModels, extLanes = [], cls = "write", mode = "
   else lanes = [...ordered, ...ext];
 
   const hedge = mode === "quality" ? lanes.filter((l) => l.provider === "gemini") : lanes;
-  return { lanes, hedge };
+  return { lanes: [...lanes, ...paid], hedge };
 }
 
 /* ── hedging ── */
@@ -190,11 +227,20 @@ export const HEDGE_MS = {
 };
 
 /* how long to wait for the FIRST sign of life (any streamed part, a thought summary included) before a second lane is started */
-export function hedgeDelayMs(cls, lane) {
+export const FIRST_FLOOR_MS = { v: 20000 };          // a request silent this long after the key's measured typical time x 8 is given up on (tests lower it)
+export const HEDGE_FLOOR_MS = { v: 5000 };          // never hedge sooner than this after a MEASURED typical time (a hedge is a request; tests lower it)
+export function hedgeDelayMs(cls, lane, factor = 1, typical = 0) {
   const h = HEDGE_MS[cls] || HEDGE_MS.write;
+  /* v3.33: when this key's real typical first-answer time for the model is KNOWN (quota.js), "silent for too long" is 3 times that, within [floor, the class maximum]:
+     a fast key stops waiting 15-30 s for a request that has plainly stalled; a slow key is not hedged by a number that was written for a fast one. */
+  if (typical > 0) return Math.round(Math.min(h.max, Math.max(HEDGE_FLOOR_MS.v, typical * 3)) * (factor > 0 ? Math.min(1, factor) : 1));
   const t = lane ? st(lane.id).ttft : 0;
   const want = t ? t * 2.5 : h.min * 1.3;
-  return Math.round(Math.min(h.max, Math.max(h.min, want)));
+  /* v3.32: `factor` < 1 is the PAID profile (config.js): a healthy paid backend starts to answer within seconds, so a lane that is silent for
+     half the usual time is already an outlier and the second lane is raced earlier. Never below 2 s (a hedge costs a request). */
+  const base = Math.min(h.max, Math.max(h.min, want));
+  if (!(factor > 0) || factor === 1) return Math.round(base);                       // FREE profile: exactly as before
+  return Math.round(Math.max(Math.min(2000, base), base * factor));                  // PAID profile: earlier, but never under 2 s (a hedge is a paid request)
 }
 
 /* when everything is cooling: how long until the first lane comes back (0 = something is ready now) */

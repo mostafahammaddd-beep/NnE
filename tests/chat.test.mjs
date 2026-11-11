@@ -104,7 +104,13 @@ test("askChat end-to-end: a short question = ONE request with low thinking; a bi
   await askChat({ apiKey: key, history: history("what does NPO mean?"), ctx, onText() {} });
   const calls1 = log.filter((l) => l.lane !== "list");
   assert.equal(calls1.length, 1);
-  assert.equal(calls1[0].body.generationConfig.thinkingConfig.thinkingLevel, "low");
+  assert.equal(calls1[0].body.generationConfig.thinkingConfig.thinkingLevel, "minimal", "v3.35: an easy question: almost no thinking …");
+  assert.ok(/lite/.test(calls1[0].lane), "… on the weakest model: " + calls1[0].lane);
+  reset(); R.__resetRouter();
+  await askChat({ apiKey: key, history: history("why is the answer B?"), ctx, onText() {} });
+  const calls1b = log.filter((l) => l.lane !== "list");
+  assert.equal(calls1b[0].body.generationConfig.thinkingConfig.thinkingLevel, "medium", "a 'why' question is not easy");
+  assert.ok(!/lite/.test(calls1b[0].lane), calls1b[0].lane);
 
   reset(); R.__resetRouter();
   /* v3.27: the outline request goes to the smallest, fastest model first; the sections are written by the everyday model */
@@ -134,9 +140,9 @@ test("reply level: the level decides the model family, the thinking depth and th
 
   const key = "AIzaLEVELKEY0001";
   const ctx = { kind: "global" };
-  const ask = async (level) => {
+  const ask = async (level, text = "why is the answer B in this question?") => {       // a question that is NOT easy: the level alone decides the model
     reset(); R.__resetRouter(); window.localStorage.clear(); setExtKeys({}); setEnginePrefs({ mode: "auto", slice: true });
-    await askChat({ apiKey: key, history: [{ role: "user", text: "what does NPO mean?" }], ctx, level, onText() {} });
+    await askChat({ apiKey: key, history: [{ role: "user", text }], ctx, level, onText() {} });
     const calls = log.filter((l) => l.lane !== "list");
     assert.equal(calls.length, 1, level);
     return calls[0];
@@ -205,7 +211,7 @@ test("search first: every tutor answer asks Google Search, and the pages it used
   };
   const base = () => { reset(); R.__resetRouter(); window.localStorage.clear(); setExtKeys({}); setEnginePrefs({ mode: "auto", slice: true }); };
   const key = "AIzaSRCKEY0000001";
-  const hist = [{ role: "user", text: "how long should hand hygiene take?" }];
+  const hist = [{ role: "user", text: "how long should hand hygiene take, and why?" }];      // not an easy question: it goes to the everyday model
 
   base(); script("gemini:gemini-flash-latest", { ok: "20 seconds.", grounding: G });
   const out = await askChat({ apiKey: key, history: hist, ctx: { kind: "global" }, onText() {} });
@@ -267,4 +273,65 @@ test("speed: a library summary never searches the web; an ordinary question does
   const q = await askChat({ apiKey: "AIzaFAST000000001", history: [{ role: "user", text: "ما هي قيمة البوتاسيوم الطبيعية؟" }], ctx: { kind: "global" }, library: { questions, topics }, onText() {} });
   assert.equal(q.searchOn, true);
   assert.ok(log.filter((l) => l.lane !== "list")[0].body.tools);
+});
+
+test("search 429 (v3.34): a chat question whose search request is turned away is answered by the SAME model without the search tool, not failed on every model", async () => {
+  const { askChat } = await import("../src/lib/chat.js");
+  const { __resetSearchGate } = await import("../src/lib/gemini.js");
+  const base = () => { reset(); R.__resetRouter(); window.localStorage.clear(); setExtKeys({}); setEnginePrefs({ mode: "auto", slice: true }); __resetSearchGate(); };
+  const key = "AIzaSRCH429KEY0001";
+  const hist = [{ role: "user", text: "مش فاهم ليه 3 غلط" }];
+  const reqs = () => log.filter((l) => l.lane !== "list");
+  const FLASH = "gemini:gemini-flash-latest";
+
+  /* a plain 429 on the request that carries the search tool */
+  base(); script(FLASH, { status: 429, msg: "Resource has been exhausted (e.g. check quota)." }, { ok: "الإجابة B لأن الأولوية للـ airway." });
+  const a = await askChat({ apiKey: key, history: hist, ctx: { kind: "global" }, onText() {} });
+  const r1 = reqs();
+  assert.equal(r1.length, 2, "one rejected request + one answer: no tour of every model");
+  assert.ok(r1[0].body.tools && !r1[1].body.tools, "the second request leaves the search tool out");
+  assert.equal(r1[0].lane, r1[1].lane, "same model, not the next one");
+  assert.ok(r1[0].body.systemInstruction.parts[0].text.includes("SEARCH FIRST"));
+  assert.ok(!r1[1].body.systemInstruction.parts[0].text.includes("SEARCH FIRST"), "without the tool the model is not told to search");
+  assert.equal(a.text, "الإجابة B لأن الأولوية للـ airway.");
+  assert.equal(a.sources.links.length, 0);
+  assert.equal(a.searchOn, true, "the screen can then say the answer has no sources");
+
+  /* the 429 is about the search quota itself: the next questions skip the tool at once (no wasted round trip) */
+  base(); script(FLASH, { status: 429, msg: "Quota exceeded for metric: generativelanguage.googleapis.com/search_grounding_requests, limit: 5" }, { ok: "answer 1" }, { ok: "answer 2" });
+  await askChat({ apiKey: key, history: hist, ctx: { kind: "global" }, onText() {} });
+  assert.equal(reqs().length, 2);
+  const before = reqs().length;
+  const b = await askChat({ apiKey: key, history: hist, ctx: { kind: "global" }, onText() {} });
+  const r2 = reqs().slice(before);
+  assert.equal(r2.length, 1); assert.ok(!r2[0].body.tools, "search stays off for a few minutes after Google refused it");
+  assert.equal(b.text, "answer 2");
+  __resetSearchGate();
+
+  /* a finished DAILY quota of the model itself: asking again without the tool would change nothing, so no extra request is made on that model */
+  base(); script(FLASH, { status: 429, msg: "You exceeded your current quota, limit: 20 per day", details: [{ violations: [{ quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier", quotaValue: "20", quotaDimensions: { model: "gemini-flash-latest" } }] }] });
+  const c = await askChat({ apiKey: key, history: hist, ctx: { kind: "global" }, onText() {} });
+  assert.equal(reqs().filter((l) => l.lane === FLASH).length, 1, "a dead daily quota is not retried");
+  assert.ok(c.text, "another model answered");
+  __resetSearchGate();
+});
+
+
+test("easy questions (v3.35): isEasyAsk is strict; an easy chat question goes to the weakest model with no thinking, everything else is untouched", async () => {
+  const { isEasyAsk, replyPlan, askChat } = await import("../src/lib/chat.js");
+  for (const t of ["what does NPO mean?", "ايه معنى tachycardia؟", "يعني ايه bradycardia", "define edema"]) assert.equal(isEasyAsk(t), true, t);
+  for (const t of ["", "why is B wrong", "ليه الإجابة ب غلط؟", "قارن بين الاتنين", "calculate the dose of 5 mg/kg", "the normal potassium is 3.5-5", "اشرحلي أمراض القلب", "summarize the lesson", "اعمل امتحان على القلب", "what does NPO mean?\nand NPO after midnight?", "x ".repeat(30), "ذاكرت ايه؟"]) assert.equal(isEasyAsk(t), false, t);
+  assert.equal(isEasyAsk("what does NPO mean?", { files: 1 }), false, "an attached file is never easy");
+  assert.equal(isEasyAsk("what does NPO mean?", { turns: 9 }), false, "deep inside a long conversation it is not self-contained");
+
+  const lists = { fast: ["gemini-flash-latest", "gemini-flash-lite-latest"], pro: ["gemini-pro-latest"] };
+  assert.deepEqual(replyPlan("balanced", lists, "x", { easy: true }).models, ["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-pro-latest"], "weakest first, the strongest last");
+  assert.equal(replyPlan("balanced", lists, "x").models[0], "gemini-flash-latest", "not easy: as before");
+  assert.equal(replyPlan("deep", lists, "x", { easy: true }).models[0], "gemini-pro-latest", "a level the student chose is never lowered");
+  assert.equal(replyPlan("max", lists, "x", { easy: true }).models[0], "gemini-pro-latest");
+
+  reset(); R.__resetRouter(); window.localStorage.clear(); setExtKeys({}); setEnginePrefs({ mode: "auto", slice: true });
+  const out = await askChat({ apiKey: "AIzaEASYKEY00000001", history: [{ role: "user", text: "ايه معنى NPO؟" }], ctx: { kind: "global" }, level: "deep", onText() {} });
+  assert.ok(/pro/.test(log.filter((l) => l.lane !== "list")[0].lane), "deep stays on the strong model even for an easy sentence");
+  assert.ok(out.text);
 });

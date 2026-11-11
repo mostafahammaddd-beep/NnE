@@ -8,7 +8,7 @@ const LS_LIMIT = "clinix:usage:limit";
 export const DEFAULT_LIMIT = 250;
 const TZ = "America/Los_Angeles";
 
-const ptDay = (ms) => new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(ms);
+export const ptDay = (ms) => new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(ms);
 
 export function nextResetMs(now = Date.now()) {
   const day = ptDay(now);

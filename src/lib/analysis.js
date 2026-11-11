@@ -16,8 +16,12 @@ import { createSlicedLesson, shouldSlice } from "./lessonflow.js";
 import { fixText, ARABIC_RULE } from "./text.js";
 import { cleanOcr, cleanWords, cleanBrief, splitReason } from "./parse.js";
 import { getModelLists, runTask } from "./gemini.js";
+import { weakFirst } from "./router.js";
 import { sourceParts, sourceNote } from "./docs.js";
 import { createFileCache, looksLikeFileError } from "./gfiles.js";
+import { stageOf, summarize } from "./latency.js";
+import { isSmallKey, orderForTask } from "./quota.js";
+import { PAID } from "./config.js";
 
 export const TASK_KEYS = {
   ocr: ["original_question_text"],
@@ -42,6 +46,12 @@ export function createAnalysis({ kind = "question", history, dataUrl, doc, extra
   const note = sourceNote(doc, extra, kind);   // "" for a plain screenshot
   const live = {};
 
+  /* v3.32 · where did the time go? Every model call of this analysis leaves a trace (gemini.js → onReport); when a stage finishes, its traces are
+     summarised (latency.js) and travel with the "done" message as `lat`, so the screen can say "ضاع 310ث في 503×2" instead of just "409ث". */
+  let reports = [];
+  const _onDone = onDone;
+  onDone = (name, m) => { const sum = summarize(reports.filter((r) => stageOf(r.task) === name)); _onDone(name, sum ? { ...m, lat: sum } : m); };
+
   const fastFirst = [...lists.fast, ...lists.pro];
   const proFirst = [...lists.pro, ...lists.fast];
 
@@ -54,12 +64,14 @@ export function createAnalysis({ kind = "question", history, dataUrl, doc, extra
       const all = [...src, { text: note + prompt.user }];
       return runTask({
         apiKey, task,
-        models: cfg.tier === "pro" ? proFirst : fastFirst,
+        /* v3.35: reading the question text off the screenshot and listing its words are easy jobs: the WEAKEST model first (Flash-Lite), the middle one next and the
+           strong one only if nothing else can answer. (A lesson's "ocr" stage is a study summary, not a transcript: it keeps the old order.) */
+        models: orderForTask(apiKey, task, cfg.tier === "pro" ? proFirst : (task === "words" || (task === "ocr" && !L)) ? weakFirst(fastFirst) : fastFirst),      // v3.33: when the strong models are nearly spent today, the word list goes to Flash-Lite (quota.js)
         system: prompt.system + (L || task !== "ocr" ? ARABIC_RULE : ""),   // the OCR transcript must stay exactly as written
         parts: useFiles ? await files.swap(all, signal) : all,
         spec: { levels: cfg.levels, budget: cfg.budget },
         maxOut: cfg.maxOut, firstMs: cfg.firstMs, idleMs: cfg.idleMs,
-        signal, onText,
+        signal, onText, onReport: (t) => reports.push(t),
         onNotice: onNotice ? (x) => onNotice(/^(solve|lesson)/.test(task) ? "reason" : task, x) : undefined,   // "Google is busy, trying again (n of 3)" → a calm note, not an error
       });
     };
@@ -243,6 +255,13 @@ export function createAnalysis({ kind = "question", history, dataUrl, doc, extra
       }
       const cfgM = { ...mode.write, maxOut: Math.min(mode.write.maxOut, 12000) };
       const cfgT = { ...mode.write, maxOut: 6000 };
+      /* v3.33 · a SMALL key (every free key, until quota.js sees evidence of a big quota; a paid setup declares itself with VITE_PAID / a gateway): main and traps are written by ONE request instead of two. The prompt is the same one
+         the app already uses for the whole of part B (no `part`), the verified brief is still in it, the sections and the total length are the same; only the
+         number of requests changes (6 → 5 per question), which is the one thing a free key cannot afford: 20 strong-model requests a day, 5 a minute. */
+      if (!L && !PAID && isSmallKey(apiKey)) {
+        S.combined = true; S.tDone = true;
+        return run("m", `lessonBm:${mode.id}`, cfgM, buildLessonBPrompt({ history, brief, extra, chips, words: wordsCap.b }));
+      }
       if (L) {
         run("m", `lessonM:${mode.id}`, cfgM, buildStudyBPrompt({ history, extra, chips, words: wordsCap.b, part: "main" }));
         run("t", `lessonT:${mode.id}`, cfgT, buildStudyBPrompt({ history, extra, chips, words: wordsCap.b, part: "traps" }));
@@ -382,6 +401,7 @@ export function createAnalysis({ kind = "question", history, dataUrl, doc, extra
   }
 
   function run(name) {
+    reports = reports.filter((r) => stageOf(r.task) !== name);        // a new run of a stage starts a clean ledger
     if (name === "reason") runReason();
     else runSimple(name);
   }

@@ -17,6 +17,7 @@
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { store, prefs } from "./storage.js";
 import { getModelLists, runTask } from "./gemini.js";
+import { weakFirst } from "./router.js";
 
 export const MAX_PHOTOS = 5;
 export const RIGHTS = "cc_publicdomain,cc_attribute,cc_sharealike";
@@ -271,7 +272,7 @@ async function decideNeed({ apiKey, question, answer, ctxHint, signal }) {
   const lists = getModelLists(apiKey);
   const text = `${ctxHint ? `CONTEXT (the saved question the student is studying): ${ctxHint}\n` : ""}STUDENT: ${String(question).slice(0, 600)}\nANSWER:\n${String(answer).slice(0, 1800)}`;
   const res = await runTask({
-    apiKey, models: lists.fast, task: "photos:need", hedgeClass: "quick", system: NEED_SYS, parts: [{ text }],
+    apiKey, models: weakFirst(lists.fast), task: "photos:need", hedgeClass: "quick", system: NEED_SYS, parts: [{ text }],
     spec: { levels: ["minimal", "low"], budget: 0 }, maxOut: 500, firstMs: 12000, idleMs: 10000, signal,
   });
   return parseShots(res.text);

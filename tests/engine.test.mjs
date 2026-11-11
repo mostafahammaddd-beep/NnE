@@ -231,3 +231,79 @@ test("the Google usage meter does not count extra-engine requests", async () => 
   assert.equal(u.total, before);
   assert.equal(u.ext, 1);
 });
+
+/* ───────── v3.32 · latency trace ───────── */
+import { breakdown as lat } from "../src/lib/latency.js";
+
+test("LATENCY TRACE: runTask reports every lane it tried (a 503, then the answer), so a slow run can be explained instead of guessed", async () => {
+  fresh();
+  script(G("gemini-3.8-flash"), { status: 503, msg: "overloaded" });
+  script(G("gemini-3.6-flash"), { ok: "fine" });
+  let trace = null;
+  const r = await runTask(base({ task: "lessonA:balanced", models: ["gemini-3.8-flash", "gemini-3.6-flash"], onReport: (t) => { trace = t; } }));
+  assert.equal(r.text, "fine");
+  assert.ok(trace && trace.endAt >= trace.t0);
+  const b = lat(trace);
+  assert.equal(b.ok, true);
+  assert.deepEqual(b.failed, ["503"]);
+  assert.equal(b.attempts, 2);
+  assert.equal(b.lane, "gemini-3.6-flash");
+  assert.equal(b.lostMs + b.waitMs + b.thinkMs + b.writeMs, b.totalMs, "the four pieces always add up to the total");
+});
+
+test("LATENCY TRACE: a call that fails completely still reports, and never throws because of the report", async () => {
+  fresh();
+  script(G("gemini-3.8-flash"), { status: 401, msg: "API key not valid" });
+  let trace = null;
+  await assert.rejects(runTask(base({ models: ["gemini-3.8-flash"], onReport: (t) => { trace = t; } })));
+  assert.ok(trace);
+  const b = lat(trace);
+  assert.equal(b.ok, false);
+  assert.deepEqual(b.failed, ["401"]);
+  /* a broken report callback must not break the request */
+  fresh();
+  const r = await runTask(base({ models: ["gemini-3.8-flash"], onReport: () => { throw new Error("boom"); } }));
+  assert.ok(r.text);
+});
+
+test("LATENCY TRACE: a lane that lost a hedge race is recorded as 'lost' (not as a failure) and the hedge is counted", async () => {
+  fresh();
+  script(G("gemini-3.8-flash"), { wait: 5000, ok: "slow" });
+  script(G("gemini-3.6-flash"), { ok: "fast answer" });
+  let trace = null;
+  const r = await runTask(base({ task: "lessonA:balanced", models: ["gemini-3.8-flash", "gemini-3.6-flash"], onReport: (t) => { trace = t; } }));
+  assert.equal(r.text, "fast answer");
+  const b = lat(trace);
+  assert.equal(b.hedges, 1);
+  assert.deepEqual(b.failed, [], "the cancelled slow lane is not a failure");
+  assert.ok(trace.attempts.some((a) => a.outcome === "lost"));
+});
+
+import { createAnalysis } from "../src/lib/analysis.js";
+
+test("ANALYSIS: every finished stage carries its latency summary (lat); a retried stage starts from a clean ledger", async () => {
+  fresh();
+  const done = {}, errors = [];
+  const finished = new Promise((resolve) => {
+    const a = createAnalysis({
+      kind: "question", history: [], dataUrl: "data:image/png;base64,iVBORw0KGgo=", doc: null, extra: "", chips: [], apiKey: KEY, modeId: "balanced",
+      onUpdate() {}, onDone: (name, m) => { (done[name] = done[name] || []).push(m); if (done.ocr && done.words && done.reason) resolve(a); },
+      onError: (name, e) => { errors.push([name, e && e.message]); resolve(a); }, onNotice() {},
+    });
+    a.start();
+  });
+  const a = await finished;
+  assert.deepEqual(errors, []);
+  for (const stage of ["ocr", "words", "reason"]) {
+    const m = done[stage][0];
+    assert.ok(m.lat, `${stage} must carry lat`);
+    assert.equal(m.lat.ok, true);
+    assert.ok(m.lat.calls >= 1);
+    assert.equal(m.lat.lostMs + m.lat.waitMs + m.lat.thinkMs + m.lat.writeMs, m.lat.totalMs);
+  }
+  assert.ok(done.reason[0].lat.calls >= 3, "the lesson is several parallel calls (solve + parts): all of them are in its ledger");
+  /* retry one stage: its ledger holds only the NEW run (1 call), not the old one on top */
+  const before = done.ocr.length;
+  await new Promise((resolve) => { const t = setInterval(() => { if (done.ocr.length > before) { clearInterval(t); resolve(); } }, 10); a.retry("ocr"); });
+  assert.equal(done.ocr[done.ocr.length - 1].lat.calls, 1);
+});

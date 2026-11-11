@@ -13,6 +13,7 @@
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { fixText } from "./text.js";
 import { getModelLists, runTask } from "./gemini.js";
+import { weakFirst } from "./router.js";
 
 const ALLOW_GEMINI_LAST_RESORT = true;
 const PROVIDER_TIMEOUT = 7000;     // one provider may take this long
@@ -145,7 +146,7 @@ async function geminiTranslate(text, signal, isWord) {
   const timer = setTimeout(() => ctrl.abort(), TOTAL_TIMEOUT - 2000);
   try {
     const res = await runTask({
-      apiKey: _key, models: lists.fast, task: "word:tr", system: GEM_SYS, parts: [{ text }],
+      apiKey: _key, models: weakFirst(lists.fast), task: "word:tr", system: GEM_SYS, parts: [{ text }],
       spec: { levels: ["minimal", "low"], budget: 0 }, maxOut: isWord ? 800 : 3000,
       hedgeMs: 5000, firstMs: 12000, idleMs: 10000, signal: ctrl.signal,
     });

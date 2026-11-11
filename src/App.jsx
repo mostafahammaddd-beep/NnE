@@ -18,7 +18,9 @@ import { removeWord, vocabKey } from "./lib/vocab.js";
 import { applyOps, assignedSet, dropItem, moveItem, navFor, organize, renameTopic, dropTopic, splitByKind, kindOf } from "./lib/topics.js";
 import { removeAllConvs } from "./lib/chathist.js";
 import { store, prefs } from "./lib/storage.js";
-import { ENV_KEY, warmUp, warmConnection } from "./lib/gemini.js";
+import { ENV_KEY, warmUp, warmConnection, currentApiKey } from "./lib/gemini.js";
+import * as Ring from "./lib/keyring.js";
+import { GATEWAY_URL } from "./lib/config.js";
 import { resizeDataUrl } from "./lib/image.js";
 import { wordLines, parseWord, studyStats } from "./lib/parse.js";
 import { saveCheer } from "./lib/motivation.js";
@@ -69,7 +71,9 @@ export default function App({ boot }) {
   const [words, setWords] = useState(boot.words);
   const [view, setView] = useState({ name: "home" });
   const [toast, setToast] = useState("");
-  const [apiKey, setApiKey] = useState(boot.apiKey || ENV_KEY);
+  /* v3.32: behind the gateway the app's "key" is the gateway's access code; an old Google key saved on the device must not be sent there (it would be refused) */
+  /* v3.34: the keys live in the key ring (any number, any company); the app's "apiKey" is the first Google key of the ring (the old single key becomes its first entry) */
+  const [apiKey, setApiKey] = useState(() => (GATEWAY_URL ? ENV_KEY : currentApiKey(boot.apiKey)));
   const [goal, setGoal] = useState(boot.goal);
   const [perf, setPerf] = useState(boot.perf);
   /* v3.25: questions and explanations have their own topics. Topics saved by an older version are sorted by kind once (a mixed topic is split in two). */
@@ -218,13 +222,13 @@ export default function App({ boot }) {
   };
   const back = () => window.history.back();
 
-  const saveKey = async (k) => {
-    const key = (k || "").trim();
-    syncUsageKey(key || ENV_KEY);                       // a new key starts a fresh usage counter
-    setApiKey(key || ENV_KEY);
-    await store.set("clinix:apikey", key);
-    setShowKey(false);
-    say(key ? "اتحفظ المفتاح 🔑" : "اتمسح المفتاح");
+  /* a key was added / moved / removed in the 🔑 window */
+  const onKeysChanged = async () => {
+    if (GATEWAY_URL) return;
+    const k = currentApiKey("");
+    syncUsageKey(k || ENV_KEY);                          // a new first key starts a fresh usage counter
+    setApiKey(k);
+    await store.set("clinix:apikey", Ring.keysOf("gemini")[0] || "");   // mirrored so an older build (and the next start) sees the same first key; "" when there is none
   };
 
   const cycleGoal = async () => {
@@ -379,7 +383,7 @@ export default function App({ boot }) {
               <Icon name={theme === "dark" ? "sun" : "moon"} size={19} />
             </button>
             <button onClick={() => setShowBackup(true)} aria-label="نسخة احتياطية" className="iconbtn"><Icon name="save" size={19} /></button>
-            <button onClick={() => setShowKey(true)} aria-label="مفتاح Gemini" data-missing={!apiKey} className="iconbtn">
+            <button onClick={() => setShowKey(true)} aria-label="مفاتيح الـ API" data-missing={!apiKey} className="iconbtn">
               <Icon name="key" size={19} />
             </button>
           </div>
@@ -425,7 +429,7 @@ export default function App({ boot }) {
       {moveQ && <MoveModal title={moveQ.title} topics={{ ...topics, list: topics.list.filter((t) => t.kind === kindOf(moveQ)) }} kind={kindOf(moveQ)} currentId={(topics.list.find((t) => t.qids.includes(moveQ.id)) || {}).id} onPick={(t) => moveTo(moveQ.id, t)} onClose={() => setMoveFor(null)} />}
       <WordPop />
       {showBackup && <BackupModal onClose={() => setShowBackup(false)} />}
-      {showKey && <KeyModal current={apiKey === ENV_KEY ? "" : apiKey} hasEnv={!!ENV_KEY} onSave={saveKey} onClose={() => setShowKey(false)} />}
+      {showKey && <KeyModal hasEnv={!!ENV_KEY} onKeysChanged={onKeysChanged} onClose={() => setShowKey(false)} />}
       {view.name === "edit" && view.ret && (
         <div className="ret-bar">
           <button type="button" className="ret-btn" onClick={returnToOrigin} title={view.ret.title || undefined}>

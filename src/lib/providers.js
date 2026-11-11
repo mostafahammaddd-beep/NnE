@@ -13,6 +13,11 @@
 
    No imports from the rest of the app (and none from Capacitor): the network pieces are injected, so this file is tested in Node. */
 
+/* v3.34 · two more companies, both PAID (so they are a fallback, never a racer): OpenAI (ChatGPT) speaks the same chat/completions format;
+   Anthropic (Claude) has its own format (api: "anthropic"): its request, headers and stream are handled by the *Anthropic functions below.
+   The keys no longer live in three boxes: they are in the key ring (keyring.js), any number per provider; this file only asks the ring. */
+import * as Ring from "./keyring.js";
+
 const ENV = (typeof import.meta !== "undefined" && import.meta.env) || {};
 const LS = () => { try { return window.localStorage; } catch (e) { return null; } };
 const read = (k) => { try { return JSON.parse(LS().getItem(k)); } catch (e) { return null; } };
@@ -48,6 +53,33 @@ export const PROVIDERS = {
     ],
     skip: /embed|moderation|ocr|codestral|pixtral|ministral|voxtral|devstral/i,
   },
+  openai: {
+    id: "openai", label: "ChatGPT (OpenAI)", rank: 4, paid: true, api: "openai", completionTokens: true, oneEach: true,
+    base: String(ENV.VITE_OPENAI_BASE || "https://api.openai.com/v1"),
+    keyUrl: "platform.openai.com/api-keys", keyHint: "sk-…",
+    maxTokens: 100000, vision: true,
+    prefer: [
+      { re: /^gpt-5(?:\.\d+)?$/i, kind: "big", effort: true },
+      { re: /^gpt-4\.1$/i, kind: "big" },
+      { re: /^gpt-4o$/i, kind: "big" },
+      { re: /^gpt-5(?:\.\d+)?-mini$/i, kind: "small", effort: true },
+      { re: /^gpt-4\.1-mini$/i, kind: "small" },
+      { re: /^gpt-4o-mini$/i, kind: "small" },
+    ],
+    skip: /embed|tts|whisper|audio|realtime|transcribe|moderation|dall|image|search|codex|instruct|davinci|babbage|computer|sora|chat-latest|\d{4}-\d{2}-\d{2}/i,
+  },
+  anthropic: {
+    id: "anthropic", label: "Claude (Anthropic)", rank: 5, paid: true, api: "anthropic", oneEach: true,
+    base: String(ENV.VITE_ANTHROPIC_BASE || "https://api.anthropic.com/v1"),
+    keyUrl: "console.anthropic.com/settings/keys", keyHint: "sk-ant-…",
+    maxTokens: 150000, vision: true,
+    prefer: [
+      { re: /^claude-sonnet-[\d-]+$/i, kind: "big" },
+      { re: /^claude-opus-[\d-]+$/i, kind: "big" },
+      { re: /^claude-haiku-[\d-]+$/i, kind: "small" },
+    ],
+    skip: /embed|\d{8}$/i,
+  },
   openrouter: {
     id: "openrouter", label: "OpenRouter", rank: 3,
     base: String(ENV.VITE_OPENROUTER_BASE || "https://openrouter.ai/api/v1"),
@@ -62,33 +94,43 @@ export const PROVIDER_IDS = Object.keys(PROVIDERS);
 
 /* ── the student's choices ── */
 
-const LS_KEYS = "clinix:xkeys:v1";
-const ENV_KEYS = { groq: ENV.VITE_GROQ_API_KEY, mistral: ENV.VITE_MISTRAL_API_KEY, openrouter: ENV.VITE_OPENROUTER_API_KEY };
+const ENV_KEYS = { groq: ENV.VITE_GROQ_API_KEY, mistral: ENV.VITE_MISTRAL_API_KEY, openrouter: ENV.VITE_OPENROUTER_API_KEY, openai: ENV.VITE_OPENAI_API_KEY, anthropic: ENV.VITE_ANTHROPIC_API_KEY };
 
+/* every key of one provider, in the student's order (a build-time key goes last), and the ones that are not resting */
+export const extKeyList = (provider) => {
+  const mine = Ring.keysOf(provider), env = String(ENV_KEYS[provider] || "").trim();
+  return env && !mine.includes(env) ? [...mine, env] : mine;
+};
+export const liveExtKeys = (provider, tried = new Set()) => Ring.candidates(provider, { tried, extra: String(ENV_KEYS[provider] || "") }).filter(Ring.isLive);
+
+/* provider → the key that is used now (a provider whose keys are all resting is still listed: its lanes are hidden by getExtLanes, and wake up by themselves) */
 export function getExtKeys() {
-  const mine = read(LS_KEYS) || {};
   const out = {};
-  for (const id of PROVIDER_IDS) { const k = String(mine[id] || ENV_KEYS[id] || "").trim(); if (k) out[id] = k; }
+  for (const id of PROVIDER_IDS) { const all = extKeyList(id); if (!all.length) continue; out[id] = all.find(Ring.isLive) || all[0]; }
   return out;
 }
-export function getSavedExtKeys() {            // what the student typed (for the input boxes), without the build-time ones
-  const mine = read(LS_KEYS) || {};
+export function getSavedExtKeys() {            // the first key of each provider (the old three-box view; kept for compatibility)
   const out = {};
-  for (const id of PROVIDER_IDS) out[id] = String(mine[id] || "").trim();
+  for (const id of PROVIDER_IDS) out[id] = Ring.keysOf(id)[0] || "";
   return out;
 }
 export function setExtKeys(obj) {
-  const clean = {};
-  for (const id of PROVIDER_IDS) { const k = String((obj && obj[id]) || "").trim(); if (k) clean[id] = k; }
-  write(LS_KEYS, clean);
+  Ring.replaceProviderKeys(PROVIDER_IDS, obj);
   _lanes = null;                               // the lane list is rebuilt with the new keys
+}
+/* a key was added / removed / came back: lanes that were set aside for hours because of the OLD keys get a new chance */
+export function keysChanged(provider) {
+  const d = read(LS_DEAD) || {};
+  for (const k of Object.keys(d)) if (!provider || k.startsWith(`${provider}:`)) delete d[k];
+  write(LS_DEAD, d);
+  _lanes = null;
 }
 
 const LS_PREFS = "clinix:engine:v1";
 export const ENGINE_MODES = ["auto", "quality", "speed"];
 export function getEnginePrefs() {
   const p = read(LS_PREFS) || {};
-  return { mode: ENGINE_MODES.includes(p.mode) ? p.mode : "auto", slice: p.slice !== false, search: p.search !== false };
+  return { mode: ENGINE_MODES.includes(p.mode) ? p.mode : "auto", slice: p.slice !== false, search: p.search !== false, reuse: p.reuse !== false };
 }
 export function setEnginePrefs(next) { write(LS_PREFS, { ...getEnginePrefs(), ...next }); }
 export const getEngineMode = () => getEnginePrefs().mode;
@@ -107,6 +149,8 @@ const FALLBACK = {
   groq: ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
   mistral: ["mistral-large-latest", "mistral-small-latest"],
   openrouter: [],
+  openai: ["gpt-5", "gpt-5-mini"],
+  anthropic: ["claude-sonnet-5-5", "claude-haiku-5-5"],
 };
 
 const sizeOf = (id) => { const m = String(id).match(/(\d+(?:\.\d+)?)\s*b\b/i) || String(id).match(/-(\d+)b/i); return m ? parseFloat(m[1]) : 0; };
@@ -116,8 +160,8 @@ export function pickLanes(provider, list) {
   const P = PROVIDERS[provider];
   const items = (Array.isArray(list) ? list : []).map((m) => (typeof m === "string" ? { id: m } : m)).filter((m) => m && m.id && !P.skip.test(m.id));
   const mk = (m, extra = {}) => ({
-    id: `${provider}:${m.id}`, provider, model: m.id, kind: "big", vision: false, pdf: false,
-    maxTokens: P.maxTokens, rank: P.rank, effort: false, ...extra,
+    id: `${provider}:${m.id}`, provider, model: m.id, kind: "big", vision: !!P.vision, pdf: false,
+    maxTokens: P.maxTokens, rank: P.rank, effort: false, paid: !!P.paid, ...extra,
   });
   const lanes = [];
 
@@ -131,6 +175,7 @@ export function pickLanes(provider, list) {
   }
 
   for (const pref of P.prefer) {
+    if (P.oneEach && lanes.some((l) => l.kind === pref.kind)) continue;               // v3.34 (paid providers): the best model of each size only
     const hit = items.find((m) => pref.re.test(m.id) && !lanes.some((l) => l.model === m.id));
     if (hit) lanes.push(mk(hit, { kind: pref.kind, effort: !!pref.effort, maxTokens: pref.maxTokens || P.maxTokens }));
   }
@@ -153,8 +198,9 @@ export function getExtLanes() {
   const out = [];
   for (const id of PROVIDER_IDS) {
     if (!keys[id]) continue;
+    if (!liveExtKeys(id).length) continue;                // every key of this provider is resting (quota finished / refused): its lanes wait out of sight
     const c = cache[id];
-    const fresh = c && c.k === tag(keys[id]) && Date.now() - c.t < LANES_TTL && Array.isArray(c.lanes);
+    const fresh = c && Date.now() - c.t < LANES_TTL && Array.isArray(c.lanes);   // the model list is the provider's, not the key's
     const lanes = fresh ? c.lanes : pickLanes(id, FALLBACK[id]);
     for (const l of lanes) if (!dead.has(l.id)) out.push(l);
   }
@@ -170,9 +216,9 @@ export async function refreshLanes(provider, request, { force = false } = {}) {
   if (!key) return [];
   const cache = read(LS_LANES) || {};
   const c = cache[provider];
-  if (!force && c && c.k === tag(key) && Date.now() - c.t < LANES_TTL && Array.isArray(c.lanes) && c.lanes.length) return c.lanes;
+  if (!force && c && Date.now() - c.t < LANES_TTL && Array.isArray(c.lanes) && c.lanes.length) return c.lanes;
   const P = PROVIDERS[provider];
-  const { status, json } = await request("GET", `${P.base}/models`, undefined, 20000, bearer(key));
+  const { status, json } = await request("GET", `${P.base}/models${P.api === "anthropic" ? "?limit=100" : ""}`, undefined, 20000, headersFor(provider, key));
   if (status === 401 || status === 403) throw extError(status, JSON.stringify(json), {}, `${provider}:models`);
   if (status !== 200) throw extError(status, JSON.stringify(json), {}, `${provider}:models`);
   const lanes = pickLanes(provider, modelsOf(json));
@@ -188,6 +234,10 @@ export function warmExt(request) {
 }
 
 export const bearer = (key) => ({ "Content-Type": "application/json", Authorization: `Bearer ${key}` });
+/* the headers each company wants (Anthropic: its own key header; the "direct browser access" one is what lets the app's WebView call it) */
+export const anthropicHeaders = (key) => ({ "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" });
+export const headersFor = (provider, key) => (PROVIDERS[provider] && PROVIDERS[provider].api === "anthropic" ? anthropicHeaders(key) : bearer(key));
+const urlFor = (lane) => (PROVIDERS[lane.provider].api === "anthropic" ? `${PROVIDERS[lane.provider].base}/messages` : `${PROVIDERS[lane.provider].base}/chat/completions`);
 
 /* ── errors (same flags the Gemini side uses, so one retry engine reads both) ── */
 
@@ -221,6 +271,8 @@ export function extError(status, bodyText, headers, laneId) {
   err.tooBig = status === 413 || /request too large|reduce your message|context length|maximum context|too many tokens|exceeds the (?:max|limit)/.test(m) && status !== 429
     || (status === 429 && /request too large/.test(m));
   err.daily = status === 429 && /per day|daily|tokens per day|requests per day|\btpd\b|\brpd\b|quota/.test(m) && !/per minute/.test(m);
+  /* v3.34 · a paid account with no credit left says so with a 400 (Claude) or a 429 "insufficient_quota" (OpenAI): that key cannot work until it is topped up */
+  if (/credit balance|insufficient_quota|billing (?:hard )?limit|exceeded your current quota|plans and billing/.test(m)) err.daily = true;
   err.paramBad = status === 400 && /(unsupported|unknown|invalid|unrecognized).*(param|reasoning|effort|field)|reasoning_effort/.test(m);
   err.dead = err.badKey || err.daily || status === 404 || status === 402
     || (status === 400 && /decommission|deprecated|does not exist|not found|no longer/.test(m))
@@ -256,7 +308,23 @@ export const effortFor = (spec) => {
   return l === "high" ? "high" : l === "medium" ? "medium" : "low";
 };
 
+/* Gemini-style parts → Anthropic's message content (text blocks and base64 image blocks) */
+function toAnthropicContent(parts, lane) {
+  const content = [];
+  for (const p of parts || []) {
+    if (p && typeof p.text === "string") { if (p.text) content.push({ type: "text", text: p.text }); }
+    else if (lane && lane.vision && p && p.inlineData && /^image\/(png|jpeg|gif|webp)$/.test(p.inlineData.mimeType || "")) content.push({ type: "image", source: { type: "base64", media_type: p.inlineData.mimeType, data: p.inlineData.data } });
+  }
+  return content.length ? content : [{ type: "text", text: "." }];
+}
+
 export function buildBody({ lane, system, parts, spec, maxOut, stream = true, extras = true }) {
+  const P = PROVIDERS[lane.provider];
+  if (P && P.api === "anthropic") {
+    const body = { model: lane.model, max_tokens: Math.max(256, Math.floor(maxOut)), stream, messages: [{ role: "user", content: toAnthropicContent(parts, lane) }] };
+    if (system) body.system = String(system);
+    return body;
+  }
   const body = {
     model: lane.model,
     messages: toMessages(system, parts, lane),
@@ -264,6 +332,7 @@ export function buildBody({ lane, system, parts, spec, maxOut, stream = true, ex
     max_tokens: Math.max(256, Math.floor(maxOut)),
     temperature: 0.3,
   };
+  if (P && P.completionTokens) { body.max_completion_tokens = body.max_tokens; delete body.max_tokens; delete body.temperature; }   // OpenAI's newer models refuse max_tokens and a custom temperature
   if (extras && lane.effort) body.reasoning_effort = effortFor(spec);
   return body;
 }
@@ -273,6 +342,8 @@ export function answerBudget(lane, promptTokens, wanted) {
   const room = (lane.maxTokens || 8000) - promptTokens - 150;
   return Math.max(0, Math.min(wanted, room));
 }
+
+const anthropicStatus = (type) => ({ authentication_error: 401, permission_error: 403, not_found_error: 404, rate_limit_error: 429, request_too_large: 413, overloaded_error: 529, invalid_request_error: 400 }[type] || 500);
 
 /* ── <think> blocks some models put inside the visible text ── */
 export function stripThink(raw) {
@@ -289,7 +360,8 @@ export function stripThink(raw) {
 export async function streamChat({ lane, key, body, signal, onText, onAlive, firstMs = 45000, idleMs = 30000, transport }) {
   const { fetch: f, abortError, timeoutError } = transport;
   if (signal.aborted) throw abortError();
-  const url = `${PROVIDERS[lane.provider].base}/chat/completions`;
+  const url = urlFor(lane);
+  const claude = PROVIDERS[lane.provider].api === "anthropic";
   const ctrl = new AbortController();
   const link = () => ctrl.abort();
   signal.addEventListener("abort", link);
@@ -304,6 +376,15 @@ export async function streamChat({ lane, key, body, signal, onText, onAlive, fir
     if (!payload || payload === "[DONE]") return;
     let j;
     try { j = JSON.parse(payload); } catch (e) { return; }
+    if (claude) {                                                            // Anthropic's events: message_start · content_block_delta · message_delta · error
+      if (j.type === "error" || j.error) throw extError(anthropicStatus(j.error && j.error.type), JSON.stringify(j), {}, lane.id);
+      if (j.type === "message_start" || j.type === "ping") onAlive && onAlive();
+      else if (j.type === "content_block_delta" && j.delta) {
+        if (j.delta.type === "text_delta" && typeof j.delta.text === "string" && j.delta.text) { raw += j.delta.text; onAlive && onAlive(); onText(raw); }
+        else onAlive && onAlive();                                          // thinking deltas: proof of life
+      } else if (j.type === "message_delta" && j.delta && j.delta.stop_reason) finish = j.delta.stop_reason === "max_tokens" ? "length" : j.delta.stop_reason;
+      return;
+    }
     if (j.error) throw extError(Number(j.error.code) || 500, JSON.stringify(j), {}, lane.id);
     const ch = j.choices && j.choices[0];
     if (!ch) return;
@@ -325,7 +406,7 @@ export async function streamChat({ lane, key, body, signal, onText, onAlive, fir
   try {
     let res;
     try {
-      res = await f(url, { method: "POST", headers: bearer(key), body: JSON.stringify(body), signal: ctrl.signal });
+      res = await f(url, { method: "POST", headers: headersFor(lane.provider, key), body: JSON.stringify(body), signal: ctrl.signal });
     } catch (e) {
       if (signal.aborted) throw abortError();
       if (why) throw timeoutError(why);
@@ -372,9 +453,10 @@ export async function streamChat({ lane, key, body, signal, onText, onAlive, fir
    native(url, headers, body, timeoutMs) → { status, data, headers } */
 export async function nativeChat({ lane, key, body, signal, onText, onAlive, native, abortError, timeoutError }) {
   if (signal.aborted) throw abortError();
-  const url = `${PROVIDERS[lane.provider].base}/chat/completions`;
+  const url = urlFor(lane);
+  const claude = PROVIDERS[lane.provider].api === "anthropic";
   let r;
-  try { r = await native(url, bearer(key), { ...body, stream: false }, 120000); }
+  try { r = await native(url, headersFor(lane.provider, key), { ...body, stream: false }, 120000); }
   catch (e) {
     if (signal.aborted) throw abortError();
     const msg = String((e && e.message) || e);
@@ -385,6 +467,12 @@ export async function nativeChat({ lane, key, body, signal, onText, onAlive, nat
   let json = r.data;
   if (typeof json === "string") { try { json = JSON.parse(json); } catch (e) { json = {}; } }
   if (r.status !== 200) throw extError(r.status, JSON.stringify(json || {}), r.headers || {}, lane.id);
+  if (claude) {
+    const text = ((json && json.content) || []).filter((b) => b && b.type === "text").map((b) => b.text).join("");
+    onAlive && onAlive();
+    if (text) onText(text);
+    return { text, finish: json && json.stop_reason === "max_tokens" ? "length" : (json && json.stop_reason) || null, block: null };
+  }
   const ch = json && json.choices && json.choices[0];
   const text = stripThink((ch && ch.message && ch.message.content) || "");
   onAlive && onAlive();

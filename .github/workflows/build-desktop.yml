@@ -42,10 +42,16 @@ jobs:
         run: npm run desktop:build
         env:
           # Optional: same GEMINI_API_KEY secret as the APK build
-          VITE_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          VITE_GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          VITE_OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          VITE_MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          VITE_GEMINI_API_KEY: ${{ vars.GATEWAY_URL == '' && secrets.GEMINI_API_KEY || '' }}
+          VITE_GROQ_API_KEY: ${{ vars.GATEWAY_URL == '' && secrets.GROQ_API_KEY || '' }}
+          VITE_OPENROUTER_API_KEY: ${{ vars.GATEWAY_URL == '' && secrets.OPENROUTER_API_KEY || '' }}
+          VITE_MISTRAL_API_KEY: ${{ vars.GATEWAY_URL == '' && secrets.MISTRAL_API_KEY || '' }}
+          # v3.32 · AI gateway (gateway/README.md): repo VARIABLE GATEWAY_URL + repo SECRET GATEWAY_TOKEN. When the gateway is on, NO provider key is baked into the app
+          # (an app file is a zip: anything baked in can be read out of it), so the four keys below are emptied.
+          VITE_GATEWAY_URL: ${{ vars.GATEWAY_URL }}
+          VITE_GATEWAY_TOKEN: ${{ secrets.GATEWAY_TOKEN }}
+          VITE_PAID: ${{ vars.PAID_KEY }}                  # set PAID_KEY=1 if you use your own PAID Google key directly (no gateway)
+          VITE_SERVICE_TIER: ${{ vars.SERVICE_TIER }}      # optional: priority (Google Tier 2+)
 
       - name: Upload installer + portable exe
         uses: actions/upload-artifact@v4

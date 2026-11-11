@@ -64,7 +64,7 @@ function forStorage(messages) {
     const m = messages[i];
     if (m.img && m.img.data.length <= budget) { keep.add(m.id); budget -= m.img.data.length; }
   }
-  return messages.filter((m) => m.role !== "ai" || m.text || m.img || m.exam || m.err).slice(-60).map(({ id, role, text, atts, img, via, exam, refs, isExam, gen, sources, searched, photos }) => ({ id, role, text, via, exam, refs, isExam, gen, sources, searched, photos: photos && photos.state === "done" && photos.items && photos.items.length ? { state: "done", items: photos.items } : undefined, atts: (atts || []).map(({ name, label, t }) => ({ name, label, t })), img: img && keep.has(id) ? img : undefined }));
+  return messages.filter((m) => m.role !== "ai" || m.text || m.img || m.exam || m.err).slice(-60).map(({ id, role, text, atts, img, via, exam, refs, isExam, gen, sources, searched, cached, photos }) => ({ id, role, text, via, exam, refs, isExam, gen, sources, searched, cached, photos: photos && photos.state === "done" && photos.items && photos.items.length ? { state: "done", items: photos.items } : undefined, atts: (atts || []).map(({ name, label, t }) => ({ name, label, t })), img: img && keep.has(id) ? img : undefined }));
 }
 
 function GenImage({ img, via, busy, onRestyle, onTranslate, bank }) {
@@ -362,7 +362,7 @@ export default function ChatPanel({
           onText: show,
         });
         show(out.text, true);
-        patch(ai.id, (m) => ({ ...m, sources: out.sources || null, searched: !!out.searchOn }));
+        patch(ai.id, (m) => ({ ...m, sources: out.sources || null, searched: !!out.searchOn, cached: !!out.cached }));
         if (photoRef.current && out.text) runPhotos(ai.id, q, splitCites(out.text).text);
       }
     } catch (err) {
@@ -664,6 +664,7 @@ export default function ChatPanel({
                 {m.text && <Rich text={m.text} />}
                 {m.role === "ai" && m.photos && <PhotoStrip photos={m.photos} />}
                 {m.role === "ai" && m.text && <Sources sources={m.sources} searched={m.searched} text={m.text} busy={busy && mi === messages.length - 1} />}
+                {m.role === "ai" && m.text && m.cached && !(busy && mi === messages.length - 1) && <div className="src-box src-none">⚡ دي إجابة محفوظة لنفس السؤال (من غير استهلاك توكنز). لو عايز إجابة جديدة اكتب السؤال بصيغة تانية.</div>}
                 {/* a big answer shows each section as soon as it is ready; the waiting card stays under it until the last one is done */}
                 {m.text && busy && mi === messages.length - 1 && stage && stage.kind === "write" && stage.done < stage.n && (
                   <WaitCard kind="text" level={m.lvl || "balanced"} stage={stage} since={m.t0} />

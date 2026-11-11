@@ -37,24 +37,38 @@
      (non-streaming) automatically.                                                                       */
 
 import { mergeGrounding } from "./sources.js";
+import * as Ring from "./keyring.js";
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
-import { MODEL_FAST, MODEL_PRO } from "./config.js";
-import {
-  taskClass, mediaOf, estimateTokens, planLanes, hedgeDelayMs, nextReadyIn, readyLanes,
-  begin as laneBegin, noteOk, noteBusy, noteDead, noteTooBig, noteSlow, clearDead as clearDeadLanes,
-} from "./router.js";
+import { MODEL_FAST, MODEL_PRO, GATEWAY_URL, GATEWAY_TOKEN, API_BASE_URL, NET, PAID, cap, SERVICE_TIER } from "./config.js";
+import { taskClass, mediaOf, estimateTokens, tierStages, planLanes, hedgeDelayMs, nextReadyIn, readyLanes, begin as laneBegin, noteOk, noteBusy, noteDead, noteTooBig, noteSlow, clearDead as clearDeadLanes, clearCool as clearCoolLanes, coolFor, setBias, isDead, isCooling } from "./router.js";
 import {
   PROVIDERS, getExtKeys, getExtLanes, refreshLanes, markExtDead, getEngineMode, answerBudget, buildBody,
-  streamChat, nativeChat, bearer,
+  streamChat, nativeChat, bearer, headersFor, liveExtKeys, extKeyList, keysChanged as extKeysChanged,
 } from "./providers.js";
 
 const ENV = (typeof import.meta !== "undefined" && import.meta.env) || {};
-import { trackRequest, noteQuota } from "./usage.js";
-export const ENV_KEY = ENV.VITE_GEMINI_API_KEY || "";
-export const API_BASE = ENV.VITE_API_BASE || "https://generativelanguage.googleapis.com/v1beta/models";
+import { trackRequest, noteQuota, nextResetMs } from "./usage.js";
+import { FIRST_FLOOR_MS } from "./router.js";
+import { parseQuota, parseDuration, noteSend, refundSend, noteQuotaError, sameAs, paceMs, budgetBias, finishedToday, deadLeftMs, finishedMessage, noteTtft, typicalTtft } from "./quota.js";
+/* v3.32: behind a gateway (config.js) the "key" the app holds is the gateway's ACCESS CODE; the real (paid) Google key never leaves the server */
+export const ENV_KEY = GATEWAY_URL && GATEWAY_TOKEN ? GATEWAY_TOKEN : (ENV.VITE_GEMINI_API_KEY || "");
+export const API_BASE = API_BASE_URL;
 
+/* v3.32 · behind a gateway every install sends a random id (never anything about the student): the gateway's daily limit is per device, so one heavy user cannot lock the others out.
+   Only sent to the gateway: Google's own servers would refuse an unknown header in a browser pre-flight. */
+function deviceId() {
+  try {
+    let d = window.localStorage.getItem("clinix:device");
+    if (!d) {
+      const raw = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+      d = raw.replace(/[^A-Za-z0-9_\-]/g, "").slice(0, 48);
+      window.localStorage.setItem("clinix:device", d);
+    }
+    return d;
+  } catch (e) { return "no-storage-id"; }
+}
 /* the key goes in a header, never in the URL */
-const hdrs = (apiKey) => ({ "Content-Type": "application/json", ...(apiKey ? { "x-goog-api-key": apiKey } : {}) });
+const hdrs = (apiKey) => ({ "Content-Type": "application/json", ...(apiKey ? { "x-goog-api-key": apiKey } : {}), ...(GATEWAY_URL ? { "x-clinix-device": deviceId() } : {}) });
 
 /* ── errors ── */
 
@@ -62,6 +76,9 @@ const RETIRED_RE = /no longer available|not available to new users|has been (?:s
 
 export function friendlyError(status, message) {
   const m = (message || "").toLowerCase();
+  /* behind the gateway the student has no key to fix: say what is really going on */
+  if (GATEWAY_URL && (status === 401 || status === 403)) return "التطبيق مش قادر يدخل على خدمة الـ AI (رمز الدخول مش مقبول). حدّث التطبيق لآخر نسخة أو كلّم المسؤول عنه.";
+  if (GATEWAY_URL && status === 429 && /daily limit/.test(m)) return "وصلت للحد اليومي للاستخدام على الجهاز ده. جرّب تاني بكرة.";
   if (/api key|api_key/.test(m) || status === 401 || status === 403)
     return "مفتاح الـ API مش مقبول أو مالوش صلاحية. اتأكد من المفتاح من أيقونة 🔑 فوق.";
   if (status === 429 && /per\s?day|daily|perday/.test(m)) return "خلصت حصة الطلبات اليومية بتاعة مفتاحك. بتتجدد منتصف الليل بتوقيت المحيط الهادي، أو استخدم مفتاح تاني.";
@@ -74,19 +91,20 @@ export function friendlyError(status, message) {
 }
 
 function apiError(status, bodyText) {
-  let message = "", retryMs = 0;
+  let message = "", retryMs = 0, errObj = null;
   try {
     const j = JSON.parse(bodyText);
-    message = j?.error?.message || "";
-    const ri = (j?.error?.details || []).find((d) => d && d.retryDelay);
-    if (ri) retryMs = Math.round(parseFloat(String(ri.retryDelay)) * 1000) || 0;
+    errObj = j && j.error && typeof j.error === "object" ? j.error : null;
+    message = (errObj && errObj.message) || "";
+    const ri = ((errObj && errObj.details) || []).find((d) => d && d.retryDelay);
+    if (ri) retryMs = parseDuration(ri.retryDelay);
   } catch (e) { message = String(bodyText || "").slice(0, 200); }
-  const err = classify(status, message);
-  if (!err.retryAfterMs && retryMs) err.retryAfterMs = Math.min(retryMs, 60000);
+  const err = classify(status, message, errObj);
+  if (!err.retryAfterMs && retryMs && !(err.quota && err.quota.kind === "day")) err.retryAfterMs = Math.min(retryMs, 60000);
   return err;
 }
 
-function classify(status, message) {
+function classify(status, message, errObj) {
   const m = (message || "").toLowerCase();
   const err = new Error(friendlyError(status, message));
   err.status = status;
@@ -98,11 +116,15 @@ function classify(status, message) {
     (status === 403 && /api key|api_key|referer|ip address|has not been used|is disabled/.test(m))
   );
   if (status === 429) noteQuota(message);
-  err.daily = status === 429 && /per\s?day|daily|perday/.test(m);
+  /* v3.33 · WHICH quota was hit is in details[].violations[].quotaId, not in the message: for a finished DAILY quota Google's text says neither "per day" nor
+     anything true about the wait ("Please retry in 20s"). Read the structured error first; the message regex stays as the fallback for answers without details. */
+  const q = status === 429 ? parseQuota(errObj, message) : null;
+  if (q) err.quota = q;
+  err.daily = status === 429 && (q.kind === "day" || /per\s?day|daily|perday/.test(m));
   const ra = m.match(/retry in ([\d.]+)\s*s/);
-  if (ra) err.retryAfterMs = Math.min(Math.round(parseFloat(ra[1]) * 1000), 60000);
+  if (ra && !(q && q.kind === "day")) err.retryAfterMs = Math.min(Math.round(parseFloat(ra[1]) * 1000), 60000);
   /* a model whose DAILY quota is gone (or whose free quota is 0) cannot answer for hours; the other models have their own quota */
-  err.dead = status === 404 || (status === 429 && (/limit:\s*0/.test(m) || err.daily)) || (status === 403 && !err.fatal);
+  err.dead = status === 404 || (status === 429 && (q.kind === "none" || /limit:\s*0/.test(m) || err.daily)) || (status === 403 && !err.fatal);
   /* "This model models/gemini-2.5-pro is no longer available to new users. Please update your code to use models/gemini-3.1-pro-preview …" */
   err.retired = status === 404 && RETIRED_RE.test(m);
   const rep = err.retired && String(message || "").match(/(?:use|using|switch to|migrate to)\s+(?:the\s+)?(?:models\/)?(gemini-[a-z0-9.\-]+)/i);
@@ -182,9 +204,9 @@ const deadSet = (apiKey) => {
   const st = deadState(apiKey), now = Date.now();
   return new Set([...Object.keys(st.map).filter((m) => st.map[m] > now), ...Object.keys(st.ret).filter((m) => st.ret[m] > now)]);
 };
-const addDead = (apiKey, model, retired) => {
+const addDead = (apiKey, model, retired, ttlMs) => {
   const st = deadState(apiKey);
-  if (retired) st.ret[model] = Date.now() + RETIRED_TTL; else st.map[model] = Date.now() + DEAD_TTL;
+  if (retired) st.ret[model] = Date.now() + RETIRED_TTL; else st.map[model] = Date.now() + (ttlMs > 0 ? ttlMs : DEAD_TTL);
   saveDead(st);
 };
 const clearDead = (apiKey) => {            // a fresh model list gives temporary failures a new chance; retired models stay retired
@@ -282,6 +304,54 @@ export async function refreshModels(apiKey, { force = false } = {}) {
   return getModelLists(apiKey);
 }
 
+/* ── v3.34 · the key ring, as the 🔑 window uses it ── */
+
+export const providerLabel = (p) => (p === "gemini" ? "Google Gemini" : (PROVIDERS[p] && PROVIDERS[p].label) || p);
+
+/* the key the REST of the app (images, speech, translation, the model list) uses: the first Gemini key of the ring.
+   `legacy` = the single key v3.33 saved in the app's store (it becomes the first entry of the ring, once). */
+export function currentApiKey(legacy = "") {
+  if (GATEWAY_URL) return ENV_KEY;
+  Ring.seedLegacyGemini(legacy);
+  const g = Ring.keysOf("gemini");
+  return g.find(Ring.isLive) || g[0] || ENV_KEY || (Ring.hasAnyKey() ? Ring.NO_GEMINI : "");
+}
+
+/* a key was added / removed: lanes and models that were set aside because of the OLD keys get a fresh start */
+export function onKeysChanged(provider) {
+  if (!provider || provider === "gemini") { clearDeadLanes("gemini:"); clearCoolLanes("gemini:"); }
+  if (!provider || provider !== "gemini") extKeysChanged(provider || "");
+}
+
+/* paste ANY key: the app works out whose it is, checks it with that company (a model-list call: it costs no quota) and adds it to the ring.
+   → { ok, provider?, label?, msg } */
+export async function addApiKey(raw) {
+  const key = String(raw || "").trim();
+  if (key.length < 16 || /\s/.test(key)) return { ok: false, msg: "المفتاح شكله مش مظبوط. انسخه كله من غير مسافات." };
+  if (Ring.listKeys().some((e) => e.key === key)) return { ok: false, msg: "المفتاح ده مضاف قبل كده." };
+  const probe = async (p) => {
+    try {
+      const url = p === "gemini" ? `${API_BASE}?pageSize=1` : `${PROVIDERS[p].base}/models${p === "anthropic" ? "?limit=1" : ""}`;
+      return (await rawRequestH("GET", url, undefined, 20000, p === "gemini" ? hdrs(key) : headersFor(p, key))).status;
+    } catch (e) { return 0; }           // no connection: not a verdict on the key
+  };
+  let provider = Ring.detectProvider(key), note = "";
+  if (provider === "unknown") {
+    if ((await probe("mistral")) === 200) provider = "mistral";
+    else return { ok: false, msg: "مش قادر أتعرف على نوع المفتاح ده. المفاتيح المدعومة: Google (AIza…) · Claude (sk-ant-…) · ChatGPT (sk-…) · Groq (gsk_…) · OpenRouter (sk-or-…) · Mistral." };
+  } else {
+    const st = await probe(provider);
+    if ([400, 401, 403].includes(st)) return { ok: false, msg: `مفتاح ${providerLabel(provider)} ده مش مقبول (غلط أو متوقف). اتأكد منه.` };
+    if (st !== 200) note = " (مقدرتش أتأكد منه دلوقتي بسبب النت أو الضغط، هيتجرّب أول ما يتستخدم)";
+  }
+  const r = Ring.addKey(key, provider);
+  if (!r.ok) return { ok: false, msg: "المفتاح ده مضاف قبل كده." };
+  onKeysChanged(provider);
+  if (provider === "gemini") { if (Ring.keysOf("gemini").length === 1) refreshModels(key, { force: true }).catch(() => {}); }
+  else refreshLanes(provider, rawRequestH, { force: true }).catch(() => {});
+  return { ok: true, provider, label: providerLabel(provider), msg: `اتضاف مفتاح ${providerLabel(provider)} ✅${note}` };
+}
+
 export async function testConnection(apiKey) {
   const { fast, pro } = await refreshModels(apiKey, { force: true });
   return `${pro[0]} + ${fast[0]}`;
@@ -313,7 +383,7 @@ export function warmExternal() {
 /* Fire-and-forget: refreshes the model list in the background. */
 export function warmUp(apiKey) {
   warmExternal();
-  if (!apiKey) return;
+  if (!apiKey || apiKey === Ring.NO_GEMINI) return;
   refreshModels(apiKey).catch(() => {});
 }
 
@@ -321,7 +391,7 @@ export function warmUp(apiKey) {
    parallel requests reuse one hot connection instead of each paying the handshake (≈ 0.3–0.8 s on mobile). */
 let _warmAt = 0;
 export function warmConnection(apiKey) {
-  if (!apiKey || Date.now() - _warmAt < 45000) return;
+  if (!apiKey || apiKey === Ring.NO_GEMINI || Date.now() - _warmAt < 45000) return;
   _warmAt = Date.now();
   try {
     fetch(`${API_BASE}?pageSize=1`, { method: "GET", cache: "no-store", headers: hdrs(apiKey) })
@@ -369,7 +439,7 @@ function readParts(json) {
   return { text, alive, finish: cand?.finishReason || null, block: json?.promptFeedback?.blockReason || null, grounding: cand?.groundingMetadata || null };
 }
 
-async function fetchStream({ apiKey, model, body, signal, onText, onAlive, firstMs, idleMs = 45000 }) {
+async function fetchStream({ apiKey, model, body, signal, onText, onAlive, firstMs, idleMs = 45000, strictFirst = false }) {
   if (signal.aborted) throw abortError();
   const url = `${API_BASE}/${model}:streamGenerateContent?alt=sse`;
   const ctrl = new AbortController();
@@ -378,16 +448,23 @@ async function fetchStream({ apiKey, model, body, signal, onText, onAlive, first
   let timer = null, why = null;
   const arm = (ms, w) => { clearTimeout(timer); timer = setTimeout(() => { why = w; ctrl.abort(); }, ms); };
   arm(firstMs, "first-byte");
+  /* v3.33: with a MEASURED first-answer time (strictFirst) the short allowance does not end when the response headers arrive: Google may send them before the first word,
+     and a request that is then stuck must be given up on after the same short time, not after the (much longer) mid-stream idle time. It ends at the first sign of life. */
+  const t0 = Date.now();
+  let seenAlive = false;
+  const waitFor = () => (strictFirst && !seenAlive ? ["first-byte", Math.max(500, firstMs - (Date.now() - t0))] : ["idle", idleMs]);
 
-  let full = "", finish = null, block = null, grounding = null;
+  let full = "", finish = null, block = null, grounding = null, usage = null, tier = "", gwMs = 0;
   const handle = (line) => {
     if (!line.startsWith("data:")) return;
     const payload = line.slice(5).trim();
     if (!payload || payload === "[DONE]") return;
     let json;
     try { json = JSON.parse(payload); } catch (e) { return; }
-    if (json.error) throw classify(json.error.code || 500, json.error.message || "");
+    if (json.error) throw classify(json.error.code || 500, json.error.message || "", json.error);
+    if (json.usageMetadata) usage = json.usageMetadata;          // token counts incl. the hidden thinking (latency.js)
     const r = readParts(json);
+    if (r.alive) seenAlive = true;
     if (r.alive && onAlive) onAlive();
     if (r.finish) finish = r.finish;
     if (r.block) block = r.block;
@@ -405,7 +482,8 @@ async function fetchStream({ apiKey, model, body, signal, onText, onAlive, first
       throw Object.assign(new Error("مفيش اتصال بسيرفرات Google. اتأكد من النت وجرّب تاني."), { detail: "fetch: " + String((e && e.message) || e), netBeforeStart: true });
     }
     if (!res.ok) throw apiError(res.status, await res.text());
-    arm(idleMs, "idle");
+    if (res.headers && typeof res.headers.get === "function") { tier = res.headers.get("x-gemini-service-tier") || ""; gwMs = parseInt(res.headers.get("x-gw-upstream-ms") || "0", 10) || 0; }
+    { const [w, ms] = waitFor(); arm(ms, w); }
 
     const reader = res.body && typeof res.body.getReader === "function" ? res.body.getReader() : null;
     if (!reader) {
@@ -422,7 +500,6 @@ async function fetchStream({ apiKey, model, body, signal, onText, onAlive, first
           throw Object.assign(new Error("النت قطع في نص التحميل. دوس إعادة المحاولة."), { detail: "stream: " + String((e && e.message) || e), interrupted: true });
         }
         if (chunk.done) break;
-        arm(idleMs, "idle");
         buf += dec.decode(chunk.value, { stream: true });
         let nl;
         while ((nl = buf.indexOf("\n")) >= 0) {
@@ -430,6 +507,7 @@ async function fetchStream({ apiKey, model, body, signal, onText, onAlive, first
           buf = buf.slice(nl + 1);
           handle(line);
         }
+        { const [w, ms] = waitFor(); arm(ms, w); }              // any data resets the silence timer (the short first-answer allowance only until the first sign of life)
       }
       buf += dec.decode();
       if (buf.trim()) handle(buf.replace(/\r$/, ""));
@@ -438,7 +516,7 @@ async function fetchStream({ apiKey, model, body, signal, onText, onAlive, first
     clearTimeout(timer);
     signal.removeEventListener("abort", link);
   }
-  return { text: full, finish, block, grounding };
+  return { text: full, finish, block, grounding, usage, tier, gwMs };
 }
 
 /* Native (non-streaming) fallback — used only if WebView fetch cannot reach Google. */
@@ -459,7 +537,7 @@ async function nativeOnce({ apiKey, model, body, signal, onText, onAlive }) {
   const out = readParts(json);
   if (out.alive && onAlive) onAlive();
   if (out.text) onText(out.text);
-  return out;
+  return { ...out, usage: json.usageMetadata || null, tier: (r.headers && (r.headers["x-gemini-service-tier"] || r.headers["X-Gemini-Service-Tier"])) || "", gwMs: 0 };
 }
 
 let _noStreamUntil = 0;
@@ -476,17 +554,35 @@ async function streamOrNative(args) {
   return nativeOnce(args);
 }
 
-async function attemptModel({ apiKey, model, task, system, parts, spec, maxOut, signal, onText, onAlive, firstMs, idleMs, search }) {
+let _tierOff = false;       // Google refused the service_tier field once → never send it again in this session
+/* v3.34 · Google Search grounding has quotas of its OWN (smaller than the model's), and a request that carries the search tool is the one Google turns away first.
+   When the search tool is what Google refused, the model itself is still fine: leave search out for a few minutes instead of failing every model in turn. */
+let _noSearchUntil = 0;
+export const __resetSearchGate = () => { _noSearchUntil = 0; };
+async function attemptModel({ apiKey, model, task, system, noSearchSystem, parts, spec, maxOut, signal, onText, onAlive, firstMs, idleMs, search }) {
+  /* v3.32 · PAID profile: a silent request is cut early (config.js NET). A Pro model that thinks "high" legitimately stays quiet longer: it keeps up to 120 s. */
+  const heavy = /pro/.test(model) || ((spec && spec.levels) || []).includes("high");
+  if (PAID) { firstMs = heavy ? Math.min(firstMs, 120000) : cap(firstMs, "first"); idleMs = heavy ? Math.min(idleMs, 120000) : cap(idleMs, "idle"); }
+  /* v3.33 · how long is "silent for too long"? Once this key's typical first-answer time for this model and kind of job is known (quota.js), 8 times that (never under
+     FIRST_FLOOR_MS): a request that has plainly stalled in Google's queue is given up on and re-sent elsewhere, instead of being waited on for the 60-240 s written for a slow day. */
+  let strictFirst = false;
+  { const typical = typicalTtft(apiKey, model, taskClass(task)); if (typical > 0) { const adapted = Math.max(FIRST_FLOOR_MS.v, typical * 8); if (adapted < firstMs) { firstMs = adapted; strictFirst = true; } } }
   const rungs = ladderFor(model, spec);
   let idx = Math.min(readMemo(model, task), rungs.length - 1);
-  let searching = !!search;       // Google Search grounding: the model looks the facts up before it answers
+  let searching = !!search && Date.now() >= _noSearchUntil;       // Google Search grounding: the model looks the facts up before it answers (v3.34: unless Google just refused the tool)
   for (;;) {
     const body = { contents: [{ role: "user", parts }], generationConfig: genConfig(model, rungs[idx], maxOut, task) };
-    if (system) body.systemInstruction = { parts: [{ text: system }] };
+    /* a request that goes out WITHOUT the search tool must not tell the model to search: it would claim a search it never made */
+    const sys = search && !searching && noSearchSystem ? noSearchSystem : system;
+    if (sys) body.systemInstruction = { parts: [{ text: sys }] };
     if (searching) body.tools = [{ google_search: {} }];
+    const tierOn = !!SERVICE_TIER && !_tierOff;               // Google "Priority inference" (Tier 2+): refused → switched off, the request repeats without it
+    if (tierOn) body.service_tier = SERVICE_TIER;
+    let sentAt = 0;
     try {
       trackRequest(model);                                       // every request counts against the daily quota
-      const out = await streamOrNative({ apiKey, model, body, signal, onText, onAlive, firstMs, idleMs });
+      sentAt = noteSend(apiKey, model);                          // v3.33: the quota ledger counts it too (per model · per minute · per day, quota.js)
+      const out = await streamOrNative({ apiKey, model, body, signal, onText, onAlive, firstMs, idleMs, strictFirst });
       if (!out.text.trim()) {
         throw Object.assign(new Error(out.block ? "السؤال اتحجب من فلتر الأمان بتاع Google. جرّب صورة تانية." : "الذكاء الاصطناعي رجّع رد فاضي. جرّب تاني."),
           { detail: `${model} · ${out.finish || out.block || "empty"}`, emptyReply: true, blocked: !!out.block });
@@ -497,8 +593,31 @@ async function attemptModel({ apiKey, model, task, system, parts, spec, maxOut, 
       if (e.thinking && idx < rungs.length - 1) { idx += 1; continue; }
       /* this model refuses the search tool (a 400 that mentions it): answer WITHOUT it rather than not at all; the app then says "no sources" */
       if (searching && e && e.status === 400 && !e.thinking && /tool|search|ground|retriev/i.test(String(e.detail || e.message || ""))) { searching = false; continue; }
+      /* v3.34 · THE ROOT CAUSE of "the server is busy" on a chat question: every tutor answer carries the Google Search tool, and a 429 that is about the search
+         quota (or a model that is only slightly over its limit) was treated as "this model is busy": it was put to sleep, the next model got the same search request, the
+         same 429, and after the last one the student saw "try again in a minute" - for a question that would have been answered in seconds without the search.
+         Now the SAME model is asked again at once, without the tool (the answer then carries no sources, and the screen says so). A real per-model limit still fails the
+         second request and goes the normal way. Not for a finished DAILY quota of the model itself or a model with no quota (nothing would change) nor the gateway's own limit. */
+      if (searching && e && e.status === 429 && !e.thinking) {
+        const groundish = /ground|search/i.test(`${e.detail || ""} ${((e.quota && e.quota.ids) || []).join(" ")}`);
+        const hopeless = !groundish && (e.daily || (e.quota && e.quota.kind === "none") || /daily limit/i.test(String(e.detail || "")));
+        if (!hopeless) {
+          if (sentAt) refundSend(apiKey, model, sentAt);
+          if (groundish) _noSearchUntil = Date.now() + 5 * 60e3;
+          searching = false; continue;
+        }
+      }
+      if (tierOn && e && [400, 403, 404].includes(e.status) && !e.thinking && /service.?tier|priority/i.test(String(e.detail || ""))) { _tierOff = true; continue; }
       if (e && !e.detail) e.detail = model;
       else if (e && e.detail && !e.detail.includes(model)) e.detail = `${model} · ${e.detail}`;
+      /* v3.33 · a request Google turned away without doing the work (429 / 5xx / no connection) is not counted by Google, so it is not counted here;
+         and a 429 teaches the ledger which quota it was: finished for today (until the reset) or just the per-minute wall (wait exactly what Google says) */
+      if (e && (e.status === 429 || e.status >= 500 || e.netBeforeStart) && sentAt) refundSend(apiKey, model, sentAt);
+      if (!GATEWAY_URL && e && e.status === 429 && e.quota) {        // behind the gateway the limits are the gateway's own (UTC day, per device), not Google's free-tier ones this ledger models
+        const r = noteQuotaError(apiKey, model, e.quota);
+        if (r.deadMs) { e.dead = true; e.daily = true; e.deadMs = r.deadMs; }
+        else if (r.coolMs) e.retryAfterMs = r.coolMs;
+      }
       throw e;
     }
   }
@@ -527,7 +646,7 @@ export function busyError(last) {
 /* Which failures are worth another try? "Google is busy / the line dropped" is; a bad key, a blocked question, a dead model
    (404 / daily quota) or a bad file is not: retrying cannot change the answer. */
 export const isTransient = (e) => !!e && !e.fatal && !e.dead && !e.blocked && !e.thinking &&
-  (e.timeout || e.interrupted || e.netBeforeStart || e.emptyReply || [408, 429, 500, 502, 503, 504].includes(e.status));
+  (e.timeout || e.interrupted || e.netBeforeStart || e.emptyReply || [408, 429, 500, 502, 503, 504, 529].includes(e.status));
 
 /* withBackoff(fn): runs fn(); on a transient error waits 2 s → 4 s → 8 s (+ random jitter) and runs it again, at most 3 retries.
    Then it throws busyError (never loops forever). onRetry({ attempt, max, waitMs, status }) lets the UI say "trying again". */
@@ -571,8 +690,25 @@ const nativeJson = async (url, headers, body, timeoutMs) => {
 const EXT_TRANSPORT = { fetch: (...a) => fetch(...a), abortError, timeoutError };
 const _extNative = {};          // provider → "the WebView cannot read its replies (CORS): use the native client until this time"
 
-async function attemptExternal({ lane, system, parts, spec, maxOut, signal, onText, onAlive, firstMs, idleMs }) {
-  const key = getExtKeys()[lane.provider];
+/* v3.34 · an engine with several keys: a key that is refused / out of credit / out of its quota is put aside and the NEXT key of the same company is used in the same
+   request, at once. Only when every key of the company has failed does the lane itself fail (and the router moves on to another lane). */
+async function attemptExternal(a) {
+  const tried = new Set();
+  let last = null;
+  for (;;) {
+    const key = liveExtKeys(a.lane.provider, tried)[0];
+    if (!key) throw last || Object.assign(new Error("مفيش مفتاح للمحرك ده."), { ext: true, badKey: true, dead: true, detail: `[${a.lane.id}] no key` });
+    try { return await attemptExternalOnce({ ...a, key }); }
+    catch (e) {
+      if (!e || e.name === "AbortError" || !(e.badKey || e.daily || e.status === 429)) throw e;
+      Ring.penalize(key, e.badKey ? 24 * 3600e3 : e.daily ? 5 * 3600e3 : Math.max(30000, e.retryAfterMs || 0), e.badKey ? "bad" : e.daily ? "day" : "busy");
+      tried.add(key); last = e;
+      if (!liveExtKeys(a.lane.provider, tried).length) throw e;
+    }
+  }
+}
+
+async function attemptExternalOnce({ lane, key, system, parts, spec, maxOut, signal, onText, onAlive, firstMs, idleMs }) {
   if (!key) throw Object.assign(new Error("مفيش مفتاح للمحرك ده."), { ext: true, badKey: true, dead: true, detail: `[${lane.id}] no key` });
   const promptTokens = estimateTokens(system, parts, 0);
   const room = answerBudget(lane, promptTokens, maxOut);
@@ -615,8 +751,8 @@ function attemptLane(a) {
 /* ── the lane-aware engine ── */
 
 const MAX_STARTS = 10;            // lane attempts of one task (hedges included)
-const MAX_WAIT_MS = 40000;        // total time a task may spend ONLY waiting for lanes to wake up
-const MAX_HINT_MS = 25000;        // everything asleep for longer than this → say "busy" now instead of making the student stare at a spinner
+const MAX_WAIT_MS = NET.maxWait;  // total time a task may spend ONLY waiting for lanes to wake up (40 s free · 15 s paid)
+const MAX_HINT_MS = NET.maxHint;  // everything asleep for longer than this → say "busy" now instead of making the student stare at a spinner (25 s free · 12 s paid)
 
 /* public: run one task.
    1. planLanes() orders the lanes that can take this request (router.js)
@@ -624,7 +760,59 @@ const MAX_HINT_MS = 25000;        // everything asleep for longer than this → 
       seconds a second lane is raced against it (hedging) and the first sign of life wins
    3. only when EVERY lane is asleep does the engine wait — for the first one to wake up, never longer than MAX_WAIT_MS in total
    `hedgeMs` is accepted and ignored (old callers). */
-export async function runTask({ apiKey, models, task, system, parts, spec, maxOut, firstMs, idleMs, signal, onText, onNotice, engineMode, hedgeClass, search }) {
+export async function runTask(args) {
+  /* v3.32: every call leaves a trace (latency.js) so a slow run can be explained instead of guessed; `onReport(trace)` receives it, success or failure */
+  const trace = { task: args && args.task, t0: Date.now(), slept: 0, attempts: [], hedges: 0 };
+  try { return await runTaskInner(args, trace); }
+  finally {
+    trace.endAt = Date.now();
+    if (args && typeof args.onReport === "function") { try { args.onReport(trace); } catch (e) { /* a report must never break a request */ } }
+  }
+}
+
+/* ── v3.34 · the key ring around the engine ──
+   The engine below works with ONE Gemini key. Here the keys of the ring are tried in order: when the key in use cannot answer (its daily quota is finished on every model,
+   it is refused, or Google keeps answering 429 / busy) it is put aside for exactly as long as it needs, the lanes' "asleep" marks (earned by that key) are forgotten and
+   the SAME request goes to the next key. The student sees nothing, unless every key is out. */
+const rotatable = (e) => !!e && e.name !== "AbortError" && !e.blocked && (e.fatal || e.status === 429 || e.busy || (e.dead && !e.status && !e.retired));
+const needGeminiError = () => Object.assign(new Error("الطلب ده بيقرا صور أو ملفات، وده محتاج مفتاح Google Gemini. أضف مفتاح Gemini من أيقونة 🔑."), { detail: "no Gemini key in the ring", needGemini: true, fatal: true });
+
+async function runTaskInner(args, trace) {
+  if (GATEWAY_URL) return runTaskOnce(args, trace);          // behind the gateway there is no key to rotate: the gateway holds the (paid) one
+  const first = Ring.candidates("gemini", { extra: args.apiKey });
+  if (!first.length) return runTaskOnce({ ...args, apiKey: "" }, trace);      // no Google key at all: the other companies' lanes (if any) answer text requests
+  if (first.length === 1) return runTaskOnce({ ...args, apiKey: first[0] }, trace);   // one key: exactly the engine as it always was
+
+  /* v3.35 · several keys: the order of the walk is "tier first, then key":
+       weak job   → weak model of key 1 → weak model of key 2 → … → (only then) the middle model of key 1, key 2 … → the strong model last
+       strong job → strong model of key 1 → strong model of key 2 → … → then the smaller ones
+     so a finished weak quota on key 1 sends the weak job to key 2's weak model and leaves key 1's strong model untouched for the jobs that need it.
+     Any other trouble with a key (refused, busy, timing out) moves the job on to the next key in the same way. */
+  const stages = tierStages(args.models);
+  let last = null;
+  for (let si = 0; si < stages.length; si++) {
+    const st = stages[si];
+    const tried = new Set();
+    for (;;) {
+      const keys = Ring.candidates("gemini", { tried, extra: args.apiKey, tier: st.tier });
+      if (!keys.length) break;
+      const key = keys[0];
+      const more = keys.length > 1 || si < stages.length - 1;
+      try { return await runTaskOnce({ ...args, apiKey: key, models: st.models, moreKeys: more }, trace); }
+      catch (err) {
+        if (!rotatable(err) || (args.signal && args.signal.aborted)) throw err;
+        const day = !!(err.daily || (err.dead && err.status === 429));
+        if (err.fatal) Ring.penalize(key, 24 * 3600e3, "bad");                                                       // refused: the whole key
+        else Ring.penalize(key, day ? Math.max(60000, nextResetMs() - Date.now()) : 45000, day ? "day" : "busy", st.tier);   // only this size of model on this key
+        tried.add(key); last = err;
+        clearDeadLanes("gemini:"); clearCoolLanes("gemini:");      // what the old key earned (asleep / dead lanes) does not apply to the next one
+      }
+    }
+  }
+  throw last || needGeminiError();
+}
+
+async function runTaskOnce({ apiKey, moreKeys, models, task, system, noSearchSystem, parts, spec, maxOut, firstMs, idleMs, signal, onText, onNotice, engineMode, hedgeClass, search }, trace) {
   if (typeof onText !== "function") onText = () => {};
   if (!signal) signal = new AbortController().signal;
   if (signal.aborted) throw abortError();
@@ -642,6 +830,10 @@ export async function runTask({ apiKey, models, task, system, parts, spec, maxOu
   /* how big the request is for a lane with a small token window: the prompt plus a realistic answer (not the generous maxOut cap) */
   const tokens = estimateTokens(system, parts, Math.min(maxOut || 0, cls === "chat" ? 1500 : 3000));
 
+  /* with another key waiting, this key is not worth a long wait: a short pause, then the next key takes over */
+  const maxWaitMs = moreKeys ? Math.min(MAX_WAIT_MS, 3000) : MAX_WAIT_MS, maxHintMs = moreKeys ? Math.min(MAX_HINT_MS, 2500) : MAX_HINT_MS;
+  const noGemini = !apiKey || apiKey === Ring.NO_GEMINI;
+
   const errs = [], tried = [];
   let shownLen = 0, shownLane = "", waited = 0, starts = 0, notices = 0, timeouts = 0, lastErr = null;
 
@@ -653,9 +845,20 @@ export async function runTask({ apiKey, models, task, system, parts, spec, maxOu
   };
 
   const plan = () => {
-    const dead = deadSet(apiKey);
+    const dead = new Set(deadSet(apiKey));
+    for (const m of order) if (finishedToday(apiKey, m)) dead.add(m);          // a model list refresh forgets "dead" marks; a finished daily quota is remembered by the ledger until the reset
     const live = order.filter((m) => !dead.has(m));
-    return planLanes({ geminiModels: live.length ? live : order, extLanes: getExtLanes(), cls, mode, media, tokens });
+    /* v3.33 · what the quota ledger knows goes to the router BEFORE the lanes are ranked: a model that has just used its per-minute quota sleeps for exactly
+       the time it needs (instead of being called, answering 429 and sleeping 15-60 s), and between equal models the one with more daily quota left goes first */
+    for (const m of order) {
+      const id = `gemini:${m}`;
+      const gone = deadLeftMs(apiKey, m);
+      if (gone > 0) noteDead(id, gone);                                    // finished for today: the router knows it too (also after a restart), so nothing is sent there
+      const w = paceMs(apiKey, m);
+      if (w > 0) coolFor(id, w);
+      setBias(id, budgetBias(apiKey, m));
+    }
+    return planLanes({ geminiModels: noGemini ? [] : (live.length ? live : order), extLanes: getExtLanes(), cls, mode, media, tokens });
   };
 
   /* bookkeeping after a failed attempt; returns true when the whole task must stop */
@@ -666,8 +869,11 @@ export async function runTask({ apiKey, models, task, system, parts, spec, maxOu
     if (lane.provider === "gemini") {
       if (err.fatal || err.blocked) return true;                              // bad key · safety filter: another Gemini model would say the same
       if (err.dead) {
-        addDead(apiKey, lane.model, !!err.retired);
-        noteDead(lane.id, err.retired ? RETIRED_TTL : DEAD_TTL);
+        const ttl = err.retired ? RETIRED_TTL : err.deadMs > 0 ? err.deadMs : DEAD_TTL;          // a finished daily quota: until the reset (quota.js), not a guess of 6 h
+        for (const name of err.deadMs > 0 ? sameAs(apiKey, lane.model) : [lane.model]) {       // gemini-flash-latest and gemini-3.8-flash are ONE quota
+          addDead(apiKey, name, !!err.retired, ttl);
+          noteDead(`gemini:${name}`, ttl);
+        }
         if (err.retired) {
           if (err.replacement) {
             addSuggest(apiKey, err.replacement);
@@ -694,17 +900,20 @@ export async function runTask({ apiKey, models, task, system, parts, spec, maxOu
     const running = () => recs.filter((r) => !r.over && !r.cancelled);
     const stopAll = (except) => recs.forEach((r) => { if (r !== except && !r.over) { r.cancelled = true; r.ctrl.abort(); } });
     const finish = (fn, v) => { if (settled) return; settled = true; clearTimeout(hedgeTimer); stopAll(null); fn(v); };
-    const nextLane = (pool) => pool.find((l) => !recs.some((r) => r.lane.id === l.id));
+    /* v3.33: `ready` was computed before this race began. A lane that has been set aside or put to sleep SINCE (a 429 on one name of the same quota, another request's
+       failure) is skipped: calling it would only waste a request. If nothing else is left the race ends and the outer loop re-plans (and waits, as always). */
+    const nextLane = (pool) => pool.find((l) => !recs.some((r) => r.lane.id === l.id) && !isDead(l.id) && !isCooling(l.id));
 
     const armHedge = (rec) => {
       clearTimeout(hedgeTimer);
       if (winner || settled || running().length >= 2) return;                    // never more than two lanes at once
       const nxt = nextLane(hedgePool.filter((l) => ready.includes(l)));
       if (!nxt || starts >= MAX_STARTS) return;
-      const ms = hedgeDelayMs(cls, rec.lane);
+      const ms = hedgeDelayMs(cls, rec.lane, NET.hedge, rec.lane.provider === "gemini" ? typicalTtft(apiKey, rec.lane.model, cls) : 0);
       hedgeTimer = setTimeout(() => {
         if (winner || settled || signal.aborted) return;
         noteSlow(rec.lane.id, ms);
+        trace.hedges += 1;
         start(nxt);
       }, ms);
     };
@@ -714,20 +923,22 @@ export async function runTask({ apiKey, models, task, system, parts, spec, maxOu
       const ctrl = new AbortController();
       const link = () => ctrl.abort();
       signal.addEventListener("abort", link, { once: true });
-      const rec = { lane, ctrl, t0: Date.now(), aliveAt: 0, over: false, end: laneBegin(lane.id) };
+      const rec = { lane, ctrl, t0: Date.now(), aliveAt: 0, textAt: 0, over: false, end: laneBegin(lane.id) };
       recs.push(rec);
       const claim = () => {
         if (rec.aliveAt) return;
         rec.aliveAt = Date.now();
+        if (lane.provider === "gemini") noteTtft(apiKey, lane.model, rec.aliveAt - rec.t0, cls);       // v3.33: how fast THIS key really answers (quota.js), remembered across restarts
         if (!winner) { winner = rec; clearTimeout(hedgeTimer); stopAll(rec); }   // first sign of life wins; the others are cancelled
       };
       const closeRec = () => { rec.over = true; rec.end(); signal.removeEventListener("abort", link); };
       attemptLane({
-        lane, apiKey, task, system, parts, spec, maxOut, signal: ctrl.signal, firstMs, idleMs, search,
-        onText: (t) => { if (winner === rec) show(lane, t); },
+        lane, apiKey, task, system, noSearchSystem, parts, spec, maxOut, signal: ctrl.signal, firstMs, idleMs, search,
+        onText: (t) => { if (!rec.textAt && t) rec.textAt = Date.now(); if (winner === rec) show(lane, t); },
         onAlive: claim,
       }).then((res) => {
         closeRec();
+        trace.attempts.push({ lane: lane.model, t0: rec.t0, aliveAt: rec.aliveAt, textAt: rec.textAt || Date.now(), endAt: Date.now(), outcome: settled ? "lost" : "ok", usage: res.usage || null, tier: res.tier || "", gwMs: res.gwMs || 0 });
         if (settled) return;
         if (!winner) winner = rec;
         noteOk(lane.id, rec.aliveAt ? rec.aliveAt - rec.t0 : Date.now() - rec.t0);
@@ -736,6 +947,9 @@ export async function runTask({ apiKey, models, task, system, parts, spec, maxOu
         finish(resolve, { ...res, model: lane.model, provider: lane.provider });
       }, (err) => {
         closeRec();
+        trace.attempts.push({ lane: lane.model, t0: rec.t0, aliveAt: rec.aliveAt, textAt: rec.textAt, endAt: Date.now(),
+          outcome: err && err.name === "AbortError" ? (rec.cancelled ? "lost" : "cancel") : "fail", status: err && err.status,
+          why: err && (err.timeout ? "timeout" : err.emptyReply ? "رد فاضي" : err.cut ? "اتقطع" : err.interrupted ? "النت قطع" : err.netBeforeStart ? "مفيش اتصال" : undefined) });
         if (settled) return;
         if (signal.aborted) return finish(reject, (err && err.name === "AbortError") ? err : abortError());
         if (err && err.name === "AbortError") return;                            // a lane WE cancelled (it lost the race): silent
@@ -761,6 +975,7 @@ export async function runTask({ apiKey, models, task, system, parts, spec, maxOu
   for (;;) {
     if (signal.aborted) throw abortError();
     const { lanes, hedge } = plan();
+    if (!lanes.length) throw noGemini ? needGeminiError() : bestError(errs, tried);       // no Google key and no other company can take this request (a scan, a PDF …)
 
     /* quality mode keeps the extra engines out of the way unless Google really is away for long */
     const gem = lanes.filter((l) => l.provider === "gemini");
@@ -770,11 +985,17 @@ export async function runTask({ apiKey, models, task, system, parts, spec, maxOu
 
     if (!ready.length) {
       const left = nextReadyIn(pool);
+      /* v3.33: every model is set aside (not just asleep): waiting a minute would be a lie. If the reason is the daily quota, say so, with the time it comes back. */
+      if (pool.length && pool.every((l) => isDead(l.id))) {
+        const msg = finishedMessage(apiKey);
+        if (msg) throw Object.assign(new Error(msg), { status: 429, daily: true, dead: true, detail: "daily quota finished on every model (quota ledger)" });
+      }
       if (!Number.isFinite(left) || starts >= MAX_STARTS) throw bestError(errs, tried);
-      if (left > MAX_HINT_MS) throw busyError(lastErr);
+      if (left > maxHintMs) throw busyError(lastErr);
       const w = Math.round(left + 150 + Math.random() * 700);
-      if (waited + w > MAX_WAIT_MS) throw busyError(lastErr);
+      if (waited + w > maxWaitMs) throw busyError(lastErr);
       waited += w;
+      trace.slept += w;
       notices += 1;
       if (onNotice) onNotice({ attempt: notices, max: 4, waitMs: w, status: (lastErr && lastErr.status) || null });
       await sleep(w, signal);
@@ -822,15 +1043,15 @@ async function imageModels(apiKey) {
 
 export async function generateImage({ apiKey, prompt, parts = [], signal }) {
   const models = await imageModels(apiKey);
-  let last = null;
+  let last = null, slow = 0;
   for (const model of models) {
     if (signal && signal.aborted) throw abortError();
     trackRequest(model);
     const url = `${API_BASE}/${model}:generateContent`;
     const body = { contents: [{ role: "user", parts: [...parts, { text: prompt }] }], generationConfig: { responseModalities: ["TEXT", "IMAGE"] } };
     let r;
-    try { r = await rawRequest("POST", url, body, 170000, apiKey); }
-    catch (e) { last = e; continue; }
+    try { r = await rawRequest("POST", url, body, NET.imageMs, apiKey); }
+    catch (e) { last = e; if (++slow >= NET.imageTimeouts) throw e; continue; }       // v3.32 paid profile: two silent models = stop (was: every model of the list, 170 s each)
     if (signal && signal.aborted) throw abortError();
     if (r.status === 200) {
       const ps = (((r.json.candidates || [])[0] || {}).content || {}).parts || [];

@@ -4,7 +4,7 @@
    Change it WITHOUT touching the code: put VITE_GEMINI_MODEL=gemini-3.5-flash-lite (or any other Flash model id) in `.env`
    (or in the GitHub workflow env next to VITE_GEMINI_API_KEY) and rebuild. Same for the strong "deep" model: VITE_GEMINI_MODEL_PRO.
    If Google says a model is retired / unavailable for your key, the app drops it and moves to the "-latest" aliases by itself. */
-const ENV = (typeof import.meta !== "undefined" && import.meta.env) || {};
+const ENV = (typeof import.meta !== "undefined" && import.meta.env) || (typeof globalThis !== "undefined" && globalThis.__CLINIX_ENV__) || {};   // __CLINIX_ENV__: lets the Node tests choose a profile (Vite replaces import.meta.env at build time)
 export const MODEL_FAST = String(ENV.VITE_GEMINI_MODEL || "gemini-flash-latest").trim();
 /* How the lesson (explanation + traps) is produced — VITE_LESSON_MODE in .env:
    "fast"   (default) silent solve → part A ∥ part B-main ∥ part B-traps: three SHORT streams at the same time. Fastest. 6 requests per analysis.
@@ -18,6 +18,29 @@ export const LESSON_SLICES = (() => { const n = parseInt(String(ENV.VITE_LESSON_
 /* material smaller than this (about N pages) keeps the old flow: it is already quick, and fewer requests are kept for the quota */
 export const SLICE_MIN_PAGES = (() => { const n = parseFloat(String(ENV.VITE_SLICE_MIN_PAGES ?? "5")); return Number.isFinite(n) ? Math.max(1, n) : 5; })();
 export const MODEL_PRO = String(ENV.VITE_GEMINI_MODEL_PRO || "gemini-pro-latest").trim();
+
+/* ── v3.32 · where the AI traffic goes, and how patient the app is ──
+   FREE profile (default): the Google free tier is slow and uneven on purpose (low priority, tiny per-model quotas, requests that sit in a queue for a
+   minute or more), so the app waits patiently: long first-byte timeouts, slow hedging.
+   PAID profile: the traffic goes through YOUR gateway (gateway/worker.js, which holds a paid Google key) or you simply set VITE_PAID=1 for a paid key
+   of your own. A healthy paid backend answers in seconds, so a request that has been silent for a short while is stuck, not slow: the app gives up
+   on it early and the next lane (another model) takes over, instead of making the student stare at a spinner for minutes.
+   VITE_GATEWAY_URL   = https://your-gateway.workers.dev   (no trailing slash)      VITE_GATEWAY_TOKEN = the access code you gave the app
+   VITE_PAID=1        = paid Google key used directly (no gateway) → only the PAID timings below
+   VITE_SERVICE_TIER  = priority   (optional, Google "Priority inference": needs Tier 2+; any refusal switches it off by itself) */
+export const GATEWAY_URL = String(ENV.VITE_GATEWAY_URL || "").trim().replace(/\/+$/, "");
+export const GATEWAY_TOKEN = String(ENV.VITE_GATEWAY_TOKEN || "").trim();
+export const PAID = !!GATEWAY_URL || ["1", "true", "on", "yes"].includes(String(ENV.VITE_PAID || "").toLowerCase());
+export const SERVICE_TIER = String(ENV.VITE_SERVICE_TIER || "").toLowerCase() === "priority" ? "priority" : "";   // never "flex": its target latency is MINUTES, wrong for a student waiting on screen
+/* the one place that knows the address of the Gemini API (gemini.js, speech.js and the Files API in gfiles.js all use it) */
+export const API_BASE_URL = String(ENV.VITE_API_BASE || (GATEWAY_URL ? `${GATEWAY_URL}/v1beta/models` : "https://generativelanguage.googleapis.com/v1beta/models"));
+export const API_ORIGIN = API_BASE_URL.replace(/\/v1beta\/models\/?$/, "");
+
+/* every waiting time of the engine in one table. `cap(ms, kind)` shortens a timeout in the PAID profile and leaves it alone in the FREE one */
+export const NET = PAID
+  ? { firstCap: 60000, idleCap: 60000, hedge: 0.5, maxWait: 15000, maxHint: 12000, imageMs: 80000, imageTimeouts: 2 }
+  : { firstCap: Infinity, idleCap: Infinity, hedge: 1, maxWait: 40000, maxHint: 25000, imageMs: 170000, imageTimeouts: 3 };     // free: patient everywhere, but three silent image models in a row is where the waiting stops (it used to be: ALL of them, 170 s each)
+export const cap = (ms, kind) => (Number.isFinite(ms) ? Math.min(ms, kind === "idle" ? NET.idleCap : NET.firstCap) : ms);
 
 export const CHIPS = [
   { id: "egy", label: "شرح بالبلدي 🇪🇬", icon: "chat", excludes: "en",

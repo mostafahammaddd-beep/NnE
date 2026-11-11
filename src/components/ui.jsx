@@ -4,8 +4,10 @@ import Icon from "./Icon.jsx";
 import logoMark from "../assets/logo-mark.webp";
 import PhotoKeysPanel from "./PhotoKeys.jsx";
 import { getPhotoKeys, setPhotoKeys } from "../lib/photos.js";
-import { testConnection, testExtProviders, warmExternal } from "../lib/gemini.js";
-import { PROVIDERS, PROVIDER_IDS, getSavedExtKeys, setExtKeys, getEnginePrefs, setEnginePrefs } from "../lib/providers.js";
+import { testConnection, testExtProviders, warmExternal, ENV_KEY, addApiKey, onKeysChanged, providerLabel } from "../lib/gemini.js";
+import * as Ring from "../lib/keyring.js";
+import { GATEWAY_URL } from "../lib/config.js";
+import { getEnginePrefs, setEnginePrefs } from "../lib/providers.js";
 
 /* The ClinixStudy logo (emblem + two-tone wordmark). The emblem sits on a white chip so it reads in both themes. */
 export function Brand({ onClick }) {
@@ -93,23 +95,12 @@ const ENGINE_OPTS = [
   ["speed", "سرعة قصوى", "الدردشة على أسرع محرك متاح"],
 ];
 
-function EnginePanel({ keys, setKeys, prefs, setPrefs }) {
+/* how the app picks between the engines (no keys here any more: they live in the one list above) */
+function EnginePanel({ prefs, setPrefs }) {
   return (
     <div className="xeng">
-      <b className="xeng-h">⚡ محركات مجانية إضافية <small>(اختياري)</small></b>
-      <p className="xeng-p">
-        كل محرك له حصة مجانية مستقلة تماماً عن Google. لو Google زحمة، الرد بيتحوّل لمحرك تاني في نفس اللحظة بدل ما تستنى.
-        مفتاح واحد كفاية، ومن غيرهم التطبيق شغال عادي.
-      </p>
-      {PROVIDER_IDS.map((id) => (
-        <label key={id} className="xeng-row">
-          <span>{PROVIDERS[id].label} <small dir="ltr">{PROVIDERS[id].keyUrl}</small></span>
-          <input value={keys[id] || ""} onChange={(e) => setKeys({ ...keys, [id]: e.target.value })} dir="ltr" className="input"
-            placeholder={PROVIDERS[id].keyHint} autoCapitalize="off" autoCorrect="off" spellCheck={false} />
-        </label>
-      ))}
-      <div className="voicepick" role="radiogroup" aria-label="طريقة اختيار المحرك" style={{ marginTop: 12 }}>
-        <b style={{ fontSize: 13.5, color: "var(--ink-2)" }}>طريقة الاختيار</b>
+      <b className="xeng-h">⚙️ طريقة الاختيار</b>
+      <div className="voicepick" role="radiogroup" aria-label="طريقة اختيار المحرك" style={{ marginTop: 8 }}>
         <div className="xeng-modes">
           {ENGINE_OPTS.map(([id, name, sub]) => (
             <button key={id} type="button" role="radio" aria-checked={prefs.mode === id} onClick={() => setPrefs({ ...prefs, mode: id })}
@@ -121,6 +112,10 @@ function EnginePanel({ keys, setKeys, prefs, setPrefs }) {
         </div>
       </div>
       <label className="xeng-check">
+        <input type="checkbox" checked={prefs.reuse !== false} onChange={(e) => setPrefs({ ...prefs, reuse: e.target.checked })} />
+        <span>لو سألت نفس السؤال السهل تاني، اعرض الإجابة المحفوظة <small>(من غير أي توكنز ولا انتظار)</small></span>
+      </label>
+      <label className="xeng-check">
         <input type="checkbox" checked={prefs.slice} onChange={(e) => setPrefs({ ...prefs, slice: e.target.checked })} />
         <span>قسّم الردود الكبيرة على كذا كاتب في نفس الوقت <small>(أسرع كتير، بس بيستهلك طلبات أكتر)</small></span>
       </label>
@@ -128,42 +123,115 @@ function EnginePanel({ keys, setKeys, prefs, setPrefs }) {
   );
 }
 
-export function KeyModal({ current, hasEnv, onSave, onClose }) {
-  const [val, setVal] = useState(current || "");
+/* v3.34 · ONE box for every key (Google, Claude, ChatGPT, Groq, OpenRouter, Mistral): the app recognises whose it is.
+   Any number of keys; they are used in this order and, when one cannot work (its daily limit is finished, it is refused, it is busy), the next one takes over by itself. */
+const KEY_STATE = {
+  day: (until) => `خلصت حصته اليومية · بيرجع لوحده ${new Date(until).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" })}`,
+  busy: () => "عليه ضغط دلوقتي · بيرجع لوحده",
+  bad: () => "مش مقبول من الشركة · امسحه أو بدّله",
+};
+
+const TIER_NAME = { weak: "الضعيف (Lite)", mid: "المتوسط (Flash)", strong: "القوي (Pro)" };
+function KeyList({ tick, onChanged }) {
+  const list = Ring.listKeys();
+  if (!list.length) return <p className="keys-empty">لسه مفيش مفاتيح. الصق أول مفتاح فوق.</p>;
+  const firstLive = {};
+  for (const e of list) if (!firstLive[e.provider] && Ring.isLive(e.key)) firstLive[e.provider] = e.id;
+  return (
+    <ul className="keys-list" data-tick={tick}>
+      {list.map((e, i) => {
+        const st = Ring.statusOf(e);
+        const note = st.state === "live" ? (firstLive[e.provider] === e.id ? "شغّال دلوقتي" : "احتياطي · بيشتغل لو اللي قبله وقف") : KEY_STATE[st.state](st.until);
+        /* a size of model that finished on this key while the key itself is fine: the other sizes keep working (and the jobs of the finished size go to the next key) */
+        const tiers = Object.entries(st.tiers || {}).map(([t, p]) => `${TIER_NAME[t]}: ${p.why === "day" ? "خلصت حصته اليومية" : "عليه ضغط"}`).join(" · ");
+        return (
+          <li key={e.id} className="keys-item" data-state={st.state === "live" ? (firstLive[e.provider] === e.id ? "on" : "standby") : st.state}>
+            <div className="keys-main">
+              <b>{providerLabel(e.provider)}</b>
+              <code dir="ltr">{Ring.mask(e.key)}</code>
+              <small>{note}</small>
+              {tiers && <small className="keys-tier">{tiers}</small>}
+            </div>
+            <div className="keys-act">
+              <button type="button" className="iconbtn" aria-label="فوق" disabled={i === 0} onClick={() => { Ring.moveKey(e.id, -1); onChanged(); }}>▲</button>
+              <button type="button" className="iconbtn" aria-label="تحت" disabled={i === list.length - 1} onClick={() => { Ring.moveKey(e.id, 1); onChanged(); }}>▼</button>
+              <button type="button" className="iconbtn" aria-label="امسح المفتاح" onClick={() => { Ring.removeKey(e.id); onKeysChanged(e.provider); onChanged(e.provider); }}><Icon name="trash" size={16} /></button>
+            </div>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+export function KeyModal({ hasEnv, onKeysChanged: notifyApp, onClose }) {
+  const [val, setVal] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [tick, setTick] = useState(0);
   const [test, setTest] = useState(null);
   const [testing, setTesting] = useState(false);
-  const [xkeys, setXkeys] = useState(getSavedExtKeys);
   const [prefs, setPrefs] = useState(getEnginePrefs);
   const [xtest, setXtest] = useState([]);
   const [pkeys, setPkeys] = useState(getPhotoKeys);
-  const persist = () => { setExtKeys(xkeys); setEnginePrefs(prefs); setPhotoKeys(pkeys); };       // the extra engines are saved here; the Gemini key goes through onSave
+  const managed = !!GATEWAY_URL;       // v3.32: the AI is served by the app's own gateway: no key to paste, no extra engines to configure
+  const changed = () => { setTick((n) => n + 1); notifyApp && notifyApp(); };
+  const persist = () => { setEnginePrefs(prefs); setPhotoKeys(pkeys); };
+  const add = async () => {
+    if (adding || !val.trim()) return;
+    setAdding(true); setMsg(null);
+    try {
+      const r = await addApiKey(val);
+      setMsg({ ok: r.ok, text: r.msg });
+      if (r.ok) { setVal(""); changed(); }
+    } catch (e) { setMsg({ ok: false, text: "حصلت مشكلة وإحنا بنضيف المفتاح. جرّب تاني." }); }
+    finally { setAdding(false); }
+  };
   const runTest = async () => {
-    const k = (val || "").trim() || current;
     persist();
     setTesting(true); setTest(null); setXtest([]);
     try {
-      if (k) { const m = await testConnection(k); setTest({ ok: true, msg: `الاتصال شغال ✅ الموديل: ${m}` }); }
-      else if (!Object.values(xkeys).some((x) => (x || "").trim())) { setTest({ ok: false, msg: "اكتب المفتاح الأول." }); }
+      const g = managed ? ENV_KEY : (Ring.keysOf("gemini")[0] || ENV_KEY);
+      if (g) { const m = await testConnection(g); setTest({ ok: true, msg: `الاتصال شغال ✅ الموديل: ${m}` }); }
+      else if (!Ring.hasAnyKey()) setTest({ ok: false, msg: "ضيف مفتاح الأول." });
     } catch (e) { setTest({ ok: false, msg: e.message, detail: e.detail }); }
-    try { setXtest(await testExtProviders()); } catch (e) { /* shown per engine */ }
+    try { if (!managed) setXtest(await testExtProviders()); } catch (e) { /* shown per engine */ }
     finally { setTesting(false); }
   };
-  const save = () => { persist(); warmExternal(); onSave(val); };
+  const save = () => { persist(); warmExternal(); onClose(); };
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="card modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <span className="modal-ico"><Icon name="key" size={22} /></span>
-          <h2>مفتاح Gemini API</h2>
+          <h2>{managed ? "الذكاء الاصطناعي" : "مفاتيح الـ API"}</h2>
         </div>
-        <p style={{ marginBottom: 12, fontSize: 14, color: "var(--ink-2)" }}>
-          الصق المفتاح هنا مرة واحدة وهيتحفظ على موبايلك بس.
-          {hasEnv ? " (فيه مفتاح مدمج وقت البناء، وده هيتفوق عليه لو كتبته)" : ""}
-        </p>
-        <input value={val} onChange={(e) => setVal(e.target.value)} dir="ltr" className="input"
-          placeholder="AIza…" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
-        <EnginePanel keys={xkeys} setKeys={setXkeys} prefs={prefs} setPrefs={setPrefs} />
-        <PhotoKeysPanel keys={pkeys} setKeys={setPkeys} />
+        {managed ? (
+          <p style={{ marginBottom: 12, fontSize: 14, color: "var(--ink-2)" }}>
+            الـ AI شغّال تلقائياً من خدمة التطبيق نفسه: مفيش مفتاح تكتبه ولا محركات تظبطها. لو حاسس إنه واقف أو بطيء، دوس «جرّب الاتصال».
+          </p>
+        ) : (
+          <>
+            <p style={{ marginBottom: 10, fontSize: 14, color: "var(--ink-2)" }}>
+              الصق أي مفتاح (Google أو Claude أو ChatGPT أو غيرهم) والتطبيق بيعرف نوعه لوحده. ضيف أي عدد: لو واحد خلصت حصته أو وقف، التالي بيشتغل تلقائياً من غير ما تحس.
+              {hasEnv ? " (فيه مفتاح مدمج وقت البناء، وبيشتغل آخر واحد)" : ""}
+            </p>
+            <div className="keys-add">
+              <input value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") add(); }} dir="ltr" className="input"
+                placeholder="الصق المفتاح هنا" autoCapitalize="off" autoCorrect="off" spellCheck={false} aria-label="مفتاح API" />
+              <button type="button" onClick={add} disabled={adding || !val.trim()} className="btn btn-teal" style={{ fontWeight: 900 }}>
+                <Icon name="plus" size={16} /> {adding ? "بنتأكد…" : "إضافة API"}
+              </button>
+            </div>
+            {msg && <div role="status" className="test-box" data-ok={msg.ok}>{msg.text}</div>}
+            <KeyList tick={tick} onChanged={changed} />
+            <EnginePanel prefs={prefs} setPrefs={setPrefs} />
+          </>
+        )}
+        <details className="keys-photos">
+          <summary>🖼️ مصادر الصور (اختياري)</summary>
+          <PhotoKeysPanel keys={pkeys} setKeys={setPkeys} />
+        </details>
         <VoicePick />
         <button onClick={runTest} disabled={testing} className="btn btn-ghost" style={{ width: "100%", marginTop: 12 }}>
           {testing ? "بنجرّب الاتصال…" : "جرّب الاتصال"}
@@ -181,8 +249,7 @@ export function KeyModal({ current, hasEnv, onSave, onClose }) {
           </div>
         ))}
         <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
-          <button onClick={save} className="btn btn-teal" style={{ flex: 1, fontWeight: 900 }}>حفظ</button>
-          <button onClick={onClose} className="btn btn-ghost">إلغاء</button>
+          <button onClick={save} className="btn btn-teal" style={{ flex: 1, fontWeight: 900 }}>تم</button>
         </div>
       </div>
     </div>

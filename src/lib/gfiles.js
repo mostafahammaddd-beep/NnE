@@ -15,7 +15,8 @@
 const ENV = (typeof import.meta !== "undefined" && import.meta.env) || {};
 export const FILES_ENABLED = String(ENV.VITE_FILES_API || "on").toLowerCase() !== "off";
 
-const ORIGIN = String(ENV.VITE_API_BASE || "https://generativelanguage.googleapis.com/v1beta/models").replace(/\/v1beta\/models\/?$/, "");
+import { API_ORIGIN } from "./config.js";
+const ORIGIN = API_ORIGIN;          // v3.32: Google itself, or your gateway (config.js) — one place decides
 const MIN_B64 = 300 * 1024;          // below this a file is cheaper to send inline than to upload separately
 const MIN_TOTAL_B64 = 900 * 1024;    // and if the whole source is small, nothing is uploaded at all
 const ACTIVE_WAIT_MS = 20000;
