@@ -24,6 +24,7 @@ test("detectProvider: one box, any key: the app knows whose it is", () => {
   assert.equal(Ring.detectProvider("gsk_abcdefghijklmnopqrstuvwxyz0123"), "groq");
   assert.equal(Ring.detectProvider("abcdefghijklmnopqrstuvwxyz012345"), "unknown");
   assert.equal(Ring.detectProvider(""), "unknown");
+  assert.equal(Ring.detectProvider("AQ.Ab8RN6IEKR0Ehbgy9BWS7jVTs-SHxxxxxxxxxxxx"), "gemini");
 });
 
 test("the ring: any number of keys, in order; duplicates and junk are refused; keys can be moved and removed", () => {
@@ -204,12 +205,16 @@ test("addApiKey: pasted, recognised, checked with its company, added; a wrong ke
   script("list#" + G2, { status: 400, msg: "API key not valid" });
   const bad = await addApiKey(G2);
   assert.equal(bad.ok, false); assert.ok(!Ring.keysOf("gemini").includes(G2));
-  /* no prefix: only Mistral can claim it */
+  /* no prefix: each company is asked in turn; Google refuses it, Mistral claims it */
+  script("list:gemini#abcdefghijklmnopqrstuvwxyz012345", { status: 400, msg: "API key not valid" });
   const m = await addApiKey("abcdefghijklmnopqrstuvwxyz012345");
   assert.ok(m.ok && m.provider === "mistral");
   script("list#zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", { status: 401, msg: "unauthorized" });
   const u = await addApiKey("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
   assert.equal(u.ok, false);
+  /* a brand-new Google key shape with no known prefix is still recognised, because Google accepts it */
+  const nk = await addApiKey("ZZ.newgooglekeyshape0000000000000001");
+  assert.ok(nk.ok && nk.provider === "gemini", nk.msg);
 });
 
 /* ── v3.35 · tier first, then key ── */
@@ -266,4 +271,13 @@ test("tiers · any other trouble with key 1 (busy for the weak model) also moves
   const r = await job(R.weakFirst([FLASH, LITE, PRO]));
   assert.equal(r.model, LITE); assert.equal(reqs().pop().key, G2);
   assert.ok(Date.now() - t0 < 6000, "took " + (Date.now() - t0));
+});
+
+test("v3.38: someone who had picked 'speed' or 'quality' is moved to auto once (the buttons are gone)", async () => {
+  const { retireManualModes, getEnginePrefs, setEnginePrefs: set } = await import("../src/lib/providers.js");
+  fresh();
+  set({ mode: "speed", reuse: false });
+  retireManualModes();
+  assert.equal(getEnginePrefs().mode, "auto");
+  assert.equal(getEnginePrefs().reuse, false, "the other settings are untouched");
 });

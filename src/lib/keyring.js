@@ -1,7 +1,7 @@
 /* ───────────── The key ring (v3.34) ─────────────
    ONE list of API keys, any number of them, from any provider. The student pastes a key, the app recognises whose it is and uses it.
 
-     Google (Gemini)   AIza…          Anthropic (Claude)  sk-ant-…        OpenAI (ChatGPT)  sk-… / sk-proj-…
+     Google (Gemini)   AIza… / AQ.…    Anthropic (Claude)  sk-ant-…        OpenAI (ChatGPT)  sk-… / sk-proj-…
      Groq              gsk_…          OpenRouter          sk-or-…         Mistral           (no prefix: recognised by asking Mistral, see gemini.js)
 
    The order is the order the keys were added (the student can move them). The engine uses the first key that is "live". When a key cannot work for a while
@@ -27,6 +27,7 @@ export const __setClock = (fn) => { _now = typeof fn === "function" ? fn : () =>
 export function detectProvider(raw) {
   const k = String(raw || "").trim();
   if (/^AIza[0-9A-Za-z_\-]{20,}$/.test(k)) return "gemini";
+  if (/^AQ\.[0-9A-Za-z_\-.]{20,}$/.test(k)) return "gemini";   // Google's newer key format (AQ.…), same Gemini API
   if (/^sk-ant-/i.test(k)) return "anthropic";
   if (/^sk-or-/i.test(k)) return "openrouter";
   if (/^gsk_/i.test(k)) return "groq";

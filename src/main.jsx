@@ -12,6 +12,7 @@ import { initVocab } from "./lib/vocab.js";
 import { initMistakes } from "./lib/mistakes.js";
 import { splashFailsafe } from "./lib/splash.js";
 import { registerPWA } from "./lib/pwa.js";
+import { retireManualModes } from "./lib/providers.js";
 
 /* ───────── start-up ─────────
    The app is painted as soon as (a) the Cairo faces are loaded (local files, capped at 0.5 s) and (b) the saved data is read.
@@ -36,6 +37,7 @@ async function fontsReady() {
   } catch (e) { /* fall back to system font */ }
 }
 
+try { retireManualModes(); } catch (e) { /* ignore */ }
 const EMPTY_BOOT = { questions: [], words: [], apiKey: "", mode: null, goal: 5, perf: {}, topics: { list: [], pinned: [], auto: true }, vocab: {}, mistakes: [] };
 
 async function start() {

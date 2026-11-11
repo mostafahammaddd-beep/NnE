@@ -1453,3 +1453,27 @@ html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--teal-2) 
 /* v3.37 · mixed Arabic / English: an English phrase is one isolated island, and the punctuation that closes it stays with the Arabic sentence */
 .en { unicode-bidi: isolate; }
 .mixed { unicode-bidi: isolate; text-align: start; }
+
+
+/* v3.38 · the API-key window: two steps, one status line, the technical bits tucked away */
+.keymodal { overflow-x: hidden; }
+.keymodal * { min-width: 0; }
+.km-lead { margin: 0 0 12px; font-size: 14px; line-height: 1.7; color: var(--ink-2); }
+.km-status { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 18px; background: rgba(255, 201, 51, .16); border: 1.5px solid rgba(255, 201, 51, .5); font-size: 20px; }
+.km-status[data-ready="true"] { background: var(--ok-soft); border-color: rgba(14, 154, 96, .4); }
+.km-status b { display: block; font-size: 15px; font-weight: 900; color: var(--ink); }
+.km-status small { display: block; margin-top: 2px; font-size: 12.5px; font-weight: 600; line-height: 1.5; color: var(--ink-2); }
+.km-step { margin-top: 12px; padding: 14px; border-radius: 20px; border: 1.5px solid var(--line-2); }
+.km-step-h { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.km-step-h i { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; flex: none; font-style: normal; font-size: 14px; font-weight: 900; background: var(--teal); color: #fff; }
+.km-step-h b { font-size: 15.5px; font-weight: 900; color: var(--ink); }
+.km-step p { margin: 0 0 10px; font-size: 13.5px; line-height: 1.7; color: var(--ink-2); }
+.km-link { width: 100%; justify-content: center; text-decoration: none; font-weight: 800; }
+.km-hint { display: block; margin-top: 8px; font-size: 12px; line-height: 1.5; color: var(--ink-3); }
+.km-block { margin-top: 14px; }
+.km-h { display: block; margin-bottom: 2px; font-size: 14px; font-weight: 900; color: var(--ink-2); }
+.km-adv { margin-top: 14px; border-top: 1.5px solid var(--line); padding-top: 6px; }
+.km-adv > summary { cursor: pointer; padding: 8px 0; font-size: 14px; font-weight: 800; color: var(--ink-2); }
+.km-adv > summary small { font-weight: 600; color: var(--ink-3); }
+.km-adv .xeng { margin-top: 8px; }
+.km-foot { position: sticky; bottom: calc(-1 * max(22px, env(safe-area-inset-bottom))); display: flex; gap: 12px; margin-top: 16px; padding: 12px 0 2px; background: var(--card, var(--bg)); }

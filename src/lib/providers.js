@@ -134,6 +134,12 @@ export function getEnginePrefs() {
 }
 export function setEnginePrefs(next) { write(LS_PREFS, { ...getEnginePrefs(), ...next }); }
 export const getEngineMode = () => getEnginePrefs().mode;
+/* v3.38 · the "quality first" / "max speed" buttons are gone from the settings: the app always chooses by itself ("auto").
+   Anyone who had picked one of them earlier is moved to auto once, so nothing stays switched on that can no longer be seen or switched off. */
+export function retireManualModes() {
+  const p = read(LS_PREFS);
+  if (p && p.mode && p.mode !== "auto") write(LS_PREFS, { ...p, mode: "auto" });
+}
 
 /* ── lanes: discovered from each provider's own model list (cached), never hard-coded to a name that may be renamed tomorrow ── */
 

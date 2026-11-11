@@ -338,8 +338,17 @@ export async function addApiKey(raw) {
   };
   let provider = Ring.detectProvider(key), note = "";
   if (provider === "unknown") {
-    if ((await probe("mistral")) === 200) provider = "mistral";
-    else return { ok: false, msg: "مش قادر أتعرف على نوع المفتاح ده. المفاتيح المدعومة: Google (AIza…) · Claude (sk-ant-…) · ChatGPT (sk-…) · Groq (gsk_…) · OpenRouter (sk-or-…) · Mistral." };
+    /* the prefix told us nothing (a new key format, or a provider with no prefix): ask each company in turn. The first one that accepts the key owns it,
+       so a future key shape never again needs an app update. */
+    let sawNet = false;
+    for (const p of ["gemini", "mistral", "openai", "groq", "openrouter", "anthropic"]) {
+      const st = await probe(p);
+      if (st === 200) { provider = p; break; }
+      if (st === 0) sawNet = true;
+    }
+    if (provider === "unknown") return { ok: false, msg: sawNet
+      ? "مقدرتش أتأكد من المفتاح ده لأن النت واقف أو المتصفح بيمنع الطلب. جرّب تاني."
+      : "المفتاح ده مش مقبول من أي شركة مدعومة (Google · Claude · ChatGPT · Groq · OpenRouter · Mistral). اتأكد إنك نسخته كامل." };
   } else {
     const st = await probe(provider);
     if ([400, 401, 403].includes(st)) return { ok: false, msg: `مفتاح ${providerLabel(provider)} ده مش مقبول (غلط أو متوقف). اتأكد منه.` };

@@ -34,7 +34,7 @@ export function installFetch() {
     const signal = init.signal;
     if (!/chat\/completions|streamGenerateContent|\/v1\/messages/.test(u)) {                 // model lists
       log.push({ lane: "list", url: u, t: Date.now(), key: keyHdr });
-      const st0 = scripts.get("list#" + keyHdr);
+      const st0 = scripts.get(`list:${isGem ? "gemini" : prov}#${keyHdr}`) || scripts.get("list#" + keyHdr);   // a list script can be bound to one provider: script("list:gemini#KEY", …)
       if (st0) return new Response(JSON.stringify({ error: { message: st0[0].msg || "x" } }), { status: st0[0].status });
       return new Response(JSON.stringify({ data: [{ id: "openai/gpt-oss-120b" }, { id: "openai/gpt-oss-20b" }, { id: "whisper-large-v3" }] }), { status: 200 });
     }
