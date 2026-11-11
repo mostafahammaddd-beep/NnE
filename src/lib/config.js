@@ -99,7 +99,10 @@ export const EMPTY_RESULT = { original_question_text: "", new_words: "", explana
 export const MODES = {
   balanced: {
     id: "balanced", label: "متوازن", sub: "", icon: "scale",
-    solve: { tier: "fast", levels: ["medium", "low"], budget: 4096, maxOut: 16000, idleMs: 60000, firstMs: 120000 },
+    /* v3.36 · the solve writes a TINY brief: it never needs 120 s of silence. A request stuck in Google's queue for two minutes was the single biggest piece of the
+       waiting (every other part of the lesson stood and waited for it). 30 s of silence = give up on that lane and fail over (a healthy request streams a thought
+       summary within seconds); `SOLVE_BOX` below is the second safety net. */
+    solve: { tier: "fast", levels: ["medium", "low"], budget: 4096, maxOut: 10000, idleMs: 30000, firstMs: 30000 },
     write: { tier: "fast", levels: ["minimal", "low"], budget: 0, maxOut: 16000, idleMs: 60000, firstMs: 90000, words: { a: 680, b: 980 } },
     /* part A needs no answer, so it starts at second 0 and runs while the answer is still being solved → it can afford to THINK */
     writeA: { tier: "fast", levels: ["low", "minimal"], budget: 1024, maxOut: 20000, idleMs: 60000, firstMs: 100000 },
@@ -111,6 +114,11 @@ export const MODES = {
     writeA: { tier: "fast", levels: ["medium", "low"], budget: 2048, maxOut: 24000, idleMs: 90000, firstMs: 140000 },
   },
 };
+
+/* v3.36 · how long (ms) the writers may wait for the silent solve's verified brief before they start WITHOUT it (the writer then solves by itself, exactly like the
+   no-brief path that already existed for a failed solve). The brief is a quality bonus, never a reason for the whole lesson to stand still behind a stuck request.
+   Mutable on purpose: the tests shrink it. */
+export const SOLVE_BOX = { balanced: 30000, deep: 120000 };
 
 export const CHEERS = [
   "كل سؤال بتحله بيقرّبك من الـ RN 💙",

@@ -21,7 +21,7 @@ import { sourceParts, sourceNote } from "./docs.js";
 import { createFileCache, looksLikeFileError } from "./gfiles.js";
 import { stageOf, summarize } from "./latency.js";
 import { isSmallKey, orderForTask } from "./quota.js";
-import { PAID } from "./config.js";
+import { PAID, SOLVE_BOX } from "./config.js";
 
 export const TASK_KEYS = {
   ocr: ["original_question_text"],
@@ -272,14 +272,29 @@ export function createAnalysis({ kind = "question", history, dataUrl, doc, extra
     };
 
     if (L) { S.t0s.solve = 0; startBC(null); }
-    else stage(`solve:${mode.id}`, mode.solve, buildSolvePrompt(), sig, () => {})
-      .then(({ text }) => { S.t0s.solve = since(); startBC(cleanBrief(text) || null); })
-      .catch((err) => {
-        if (isAbort(err) || sig.aborted) return;
-        if (err.fatal || err.busy) return fail(err);
+    else {
+      /* v3.36 · the solve is TIME-BOXED. Everything after it (main + traps) used to wait for it with no limit: one request stuck in Google's queue (429 / 503 / a silent
+         connection) held the whole lesson for minutes, although the writing itself takes ~40 s. Now: the brief arrives inside the box → the verified path, exactly as
+         before; it does not → the solve is cancelled and the writer starts at once WITHOUT the brief (it solves by itself: the path that already existed for a failed solve). */
+      const solveCtrl = new AbortController();
+      const link = () => solveCtrl.abort();
+      sig.addEventListener("abort", link, { once: true });
+      let moved = false, boxed = false, timer = null;
+      const go = (brief) => {
+        if (moved) return;
+        moved = true; clearTimeout(timer); sig.removeEventListener("abort", link);
         S.t0s.solve = since();
-        startBC(null);
-      });
+        startBC(brief);
+      };
+      timer = setTimeout(() => { if (moved || sig.aborted) return; boxed = true; solveCtrl.abort(); go(null); }, SOLVE_BOX[mode.id] || 30000);
+      stage(`solve:${mode.id}`, mode.solve, buildSolvePrompt(), solveCtrl.signal, () => {})
+        .then(({ text }) => { if (boxed || sig.aborted) return; go(cleanBrief(text) || null); })
+        .catch((err) => {
+          if (boxed || sig.aborted || isAbort(err)) return;
+          if (err.fatal || err.busy) { moved = true; clearTimeout(timer); return fail(err); }
+          go(null);
+        });
+    }
   }
 
   /* ── reason, SPLIT ("split" mode): the lesson is written by TWO requests at the same time ──
