@@ -64,10 +64,25 @@ export function layout(src) {
   const nodes = [];
   let last = 0;
   for (const m of plain.matchAll(LATIN_RUN)) {
+    /* v3.37: punctuation that CLOSES an English phrase ("Heparin," "Warfarin." "Insulin:") belongs to the Arabic sentence, not to the English island.
+       Inside the island an ASCII "," or "." is drawn on the English side (left of the word), i.e. the wrong side of an Arabic line. */
+    let end = m.index + m[0].length;
+    while (end > m.index + 1 && /[.,;:!?]/.test(plain[end - 1])) end--;
+    if (m.index < last) continue;
     if (m.index > last) nodes.push({ run: false, parts: groups(last, m.index) });
-    nodes.push({ run: true, parts: groups(m.index, m.index + m[0].length) });
-    last = m.index + m[0].length;
+    nodes.push({ run: true, parts: groups(m.index, end) });
+    last = end;
   }
   if (last < plain.length) nodes.push({ run: false, parts: groups(last, plain.length) });
   return nodes;
+}
+
+/* reading direction of one line: Arabic when Arabic words are at least half as many as the English ones (an Arabic sentence with a few English
+   terms), English when the line is mostly English with one Arabic word. (Any Arabic used to make the whole line right-to-left.) */
+export function dirFor(s) {
+  const t = String(s || "").replace(/\*\*|==/g, "");
+  const ar = (t.match(/[\u0600-\u06FF]+/g) || []).length;
+  if (!ar) return "ltr";
+  const en = (t.match(/[A-Za-z][A-Za-z0-9'’\-/.%+&]*/g) || []).length;
+  return ar * 2 >= en ? "rtl" : "ltr";
 }

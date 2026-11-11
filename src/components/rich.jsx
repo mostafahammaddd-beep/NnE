@@ -3,7 +3,7 @@ import Icon from "./Icon.jsx";
 import { hasArabic, wordLines, parseWord } from "../lib/parse.js";
 import { speak, warm, cycleSpeed, useSpeechState, useSpeed } from "../lib/speech.js";
 import { fixText } from "../lib/text.js";
-import { layout } from "../lib/emphasis.js";
+import { layout, dirFor } from "../lib/emphasis.js";
 import { useLinks, findLinked, titleOf } from "../lib/linkctx.js";
 import { useVocab, setLevel, removeWord, vocabKey } from "../lib/vocab.js";
 
@@ -98,9 +98,15 @@ export function Inline({ text }) {
   );
 }
 
+/* a short mixed Arabic/English text (a topic summary, a weak-point name) with the same English isolation and punctuation handling as the lessons */
+export function Mixed({ text, as: Tag = "span", className }) {
+  const t = fixText(text || "");
+  return <Tag dir={dirFor(t)} className={className ? `mixed ${className}` : "mixed"}><Inline text={t} /></Tag>;
+}
+
 /* ───────── rich text (explanation + tricks) ───────── */
 
-const dirOf = (s) => (hasArabic(s) ? "rtl" : "ltr");
+const dirOf = dirFor;
 
 function parseBlocks(text) {
   const out = [];

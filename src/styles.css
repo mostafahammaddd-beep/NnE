@@ -1448,3 +1448,8 @@ html { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--teal-2) 
 .keys-photos > summary { cursor: pointer; font-size: 14px; font-weight: 800; color: var(--ink-2); padding: 6px 0; }
 
 .keys-main .keys-tier { color: #B7791F; }
+
+
+/* v3.37 · mixed Arabic / English: an English phrase is one isolated island, and the punctuation that closes it stays with the Arabic sentence */
+.en { unicode-bidi: isolate; }
+.mixed { unicode-bidi: isolate; text-align: start; }

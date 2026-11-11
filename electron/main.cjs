@@ -2,6 +2,15 @@
    Loads the exact same built web app (dist/) that the Android version uses; nothing in src/ changes. */
 const { app, BrowserWindow, shell, session, Menu } = require("electron");
 const path = require("path");
+const fs = require("fs");
+
+/* v3.37 · "live" desktop app: when electron/live.json holds { "url": "https://<user>.github.io/<repo>/" } (the desktop workflow writes it when you give it
+   a Pages address) the window opens the newest web build from there, so a change on GitHub shows up the next time the app is opened: no new 160 MB installer.
+   No network, or the page fails to load → the copy packed inside the app (dist/) opens instead. Without the file everything works exactly as before. */
+const LIVE_URL = (() => {
+  try { const u = String(JSON.parse(fs.readFileSync(path.join(__dirname, "live.json"), "utf8")).url || "").trim(); return /^https:\/\//.test(u) ? u : ""; }
+  catch (e) { return ""; }
+})();
 
 const BRAND = "#FFFFFF";
 /* Hosts the page may call from file:// . Every one of them gets CORS headers added to its replies (Electron allows ONE
@@ -45,7 +54,11 @@ function createWindow() {
     },
   });
 
-  win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+  const local = () => win && win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+  if (LIVE_URL) {
+    win.webContents.once("did-fail-load", local);
+    win.loadURL(LIVE_URL).catch(local);
+  } else local();
 
   // external links open in the normal browser, never inside the app window
   win.webContents.setWindowOpenHandler(({ url }) => {

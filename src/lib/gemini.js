@@ -40,7 +40,8 @@ import { mergeGrounding } from "./sources.js";
 import * as Ring from "./keyring.js";
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { MODEL_FAST, MODEL_PRO, GATEWAY_URL, GATEWAY_TOKEN, API_BASE_URL, NET, PAID, cap, SERVICE_TIER } from "./config.js";
-import { taskClass, mediaOf, estimateTokens, tierStages, planLanes, hedgeDelayMs, nextReadyIn, readyLanes, begin as laneBegin, noteOk, noteBusy, noteDead, noteTooBig, noteSlow, clearDead as clearDeadLanes, clearCool as clearCoolLanes, coolFor, setBias, isDead, isCooling } from "./router.js";
+import { tierOf, taskClass, mediaOf, estimateTokens, tierStages, planLanes, hedgeDelayMs, nextReadyIn, readyLanes, begin as laneBegin, noteOk, noteBusy, noteDead, noteTooBig, noteSlow, clearDead as clearDeadLanes, clearCool as clearCoolLanes, coolFor, setBias, isDead, isCooling } from "./router.js";
+import { makeGuard, REWRITE_AT, allowRetry } from "./guard.js";
 import {
   PROVIDERS, getExtKeys, getExtLanes, refreshLanes, markExtDead, getEngineMode, answerBudget, buildBody,
   streamChat, nativeChat, bearer, headersFor, liveExtKeys, extKeyList, keysChanged as extKeysChanged,
@@ -763,11 +764,37 @@ const MAX_HINT_MS = NET.maxHint;  // everything asleep for longer than this → 
 export async function runTask(args) {
   /* v3.32: every call leaves a trace (latency.js) so a slow run can be explained instead of guessed; `onReport(trace)` receives it, success or failure */
   const trace = { task: args && args.task, t0: Date.now(), slept: 0, attempts: [], hedges: 0 };
-  try { return await runTaskInner(args, trace); }
+  try { return await guardedTask(args, trace); }
   finally {
     trace.endAt = Date.now();
     if (args && typeof args.onReport === "function") { try { args.onReport(trace); } catch (e) { /* a report must never break a request */ } }
   }
+}
+
+/* v3.37 · the output guard (guard.js) wraps EVERY Arabic-prose request here, the one door all screens use:
+   what streams to the screen and what is returned is already free of leaked prompt lines and of letter-level spelling glitches.
+   A weak lane (Flash-Lite, an extra engine) whose answer needed several repairs is written again once by a stronger Google model (budgeted). */
+async function guardedTask(args, trace) {
+  const guard = args ? makeGuard(args) : null;
+  if (!guard) return runTaskInner(args, trace);
+  const inner = typeof args.onText === "function" ? args.onText : null;
+  const wrapped = { ...args, onText: (t, m) => { if (inner) inner(guard.scrub(t, false).text, m); } };
+  let res = await runTaskInner(wrapped, trace);
+  let out = guard.scrub(res.text, true);
+  trace.guard = { leaks: out.leaks, fixes: out.fixes, rewritten: false };
+  const weakLane = res.provider !== "gemini" || tierOf(res.model || "") === "weak";
+  const stronger = (args.models || []).filter((m) => tierOf(m) !== "weak");
+  if (out.fixes >= REWRITE_AT && weakLane && stronger.length && !(args.signal && args.signal.aborted) && allowRetry()) {
+    try {
+      const again = await runTaskInner({ ...wrapped, models: stronger, engineMode: "quality" }, trace);
+      const o2 = guard.scrub(again.text, true);
+      if (o2.fixes < out.fixes) { res = again; out = o2; trace.guard = { leaks: o2.leaks, fixes: o2.fixes, rewritten: true }; }
+    } catch (e) {
+      if (e && e.name === "AbortError") throw e;                  // the student stopped it
+      /* the stronger model could not answer: keep the first (already repaired) answer */
+    }
+  }
+  return { ...res, text: out.text };
 }
 
 /* ── v3.34 · the key ring around the engine ──

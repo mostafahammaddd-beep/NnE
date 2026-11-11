@@ -11,6 +11,7 @@ import { loadBoot } from "./lib/storage.js";
 import { initVocab } from "./lib/vocab.js";
 import { initMistakes } from "./lib/mistakes.js";
 import { splashFailsafe } from "./lib/splash.js";
+import { registerPWA } from "./lib/pwa.js";
 
 /* ───────── start-up ─────────
    The app is painted as soon as (a) the Cairo faces are loaded (local files, capped at 0.5 s) and (b) the saved data is read.
@@ -18,6 +19,7 @@ import { splashFailsafe } from "./lib/splash.js";
    src/lib/splash.js to fade it out once the first real screen is drawn: no white frame, no spinner, no layout jump. */
 
 splashFailsafe(5000);
+registerPWA();
 
 const FACES = ["400", "600", "700", "900"];
 const withTimeout = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(r, ms))]);

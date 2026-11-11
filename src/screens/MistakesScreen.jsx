@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import Icon from "../components/Icon.jsx";
-import { RichText } from "../components/rich.jsx";
+import { RichText, Mixed } from "../components/rich.jsx";
 import { stampShort } from "../lib/time.js";
 import {
   useMistakes, filterList, organizeMistakes, summarize, catInfo, recordAnswer, setMastered, removeMistake, clearMastered, MASTER_AT,
@@ -218,7 +218,7 @@ export default function MistakesScreen({ onAsk, onHome }) {
       )}
 
       {sum.weakest && sum.open > 0 && (
-        <p className="mweak"><Icon name="target" size={16} /> أضعف نقطة عندك دلوقتي: <b dir="auto">{sum.weakest.name}</b>{sum.repeated > 0 && <span> · {sum.repeated} {plural(sum.repeated, "سؤال", "أسئلة")} اتكرر فيهم الغلط</span>}</p>
+        <p className="mweak"><Icon name="target" size={16} /> أضعف نقطة عندك دلوقتي: <b><Mixed text={sum.weakest.name} /></b>{sum.repeated > 0 && <span> · {sum.repeated} {plural(sum.repeated, "سؤال", "أسئلة")} اتكرر فيهم الغلط</span>}</p>
       )}
 
       <div className="mcta">

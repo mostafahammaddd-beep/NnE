@@ -1,9 +1,22 @@
 name: Build Desktop (Windows)
 
+# v3.37 · the Windows build is slow (a Windows runner + Electron): it runs by hand, or when the desktop shell itself changes.
 on:
   push:
     branches: [main, master]
+    paths:
+      - "**/electron/**"
+      - ".github/workflows/build-desktop.yml"
   workflow_dispatch:
+    inputs:
+      live_url:
+        description: "Pages address (https://<user>.github.io/<repo>/) → a LIVE desktop app that always opens the newest web build. Empty = the old self-contained app."
+        required: false
+        default: ""
+
+concurrency:
+  group: desktop
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -32,6 +45,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: "**/package-lock.json"
+
+      - name: Live desktop app (optional)
+        if: ${{ inputs.live_url != '' }}
+        working-directory: ${{ steps.proj.outputs.dir }}
+        shell: bash
+        env:
+          LIVE_URL: ${{ inputs.live_url }}
+        run: |
+          node -e 'require("fs").writeFileSync("electron/live.json", JSON.stringify({ url: process.env.LIVE_URL }))'
 
       - name: Install dependencies
         working-directory: ${{ steps.proj.outputs.dir }}

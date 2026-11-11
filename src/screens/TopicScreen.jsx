@@ -3,7 +3,7 @@ import Icon from "../components/Icon.jsx";
 import { ConfirmButton } from "../components/ui.jsx";
 import FontSizer from "../components/FontSizer.jsx";
 import { useTextScale, scaleStyle } from "../lib/textscale.js";
-import { RichText, WordList } from "../components/rich.jsx";
+import { RichText, WordList, Mixed } from "../components/rich.jsx";
 import { orderTopicItems, topicSig, topicOverview } from "../lib/topics.js";
 import { itemsFromSaved } from "../lib/docs.js";
 import { wordLines, parseWord } from "../lib/parse.js";
@@ -158,7 +158,7 @@ export default function TopicScreen({ topic, questions, apiKey, onNeedKey, onOpe
           ) : (
             <h1 dir="auto">{topic.name} <button type="button" className="iconbtn topic-edit" onClick={() => setEditing(true)} aria-label="غيّر اسم الموضوع"><Icon name="pencil" size={14} /></button></h1>
           )}
-          {topic.summary && <p className="topic-sum" dir="auto">{topic.summary}</p>}
+          {topic.summary && <Mixed as="p" className="topic-sum" text={topic.summary} />}
           <div className="pills">
             {exams.length > 0 && <span className="pill"><Icon name="fileText" size={14} /> <b>{exams.length}</b> أسئلة</span>}
             {lessons.length > 0 && <span className="pill pill-lesson"><Icon name="bookOpen" size={14} /> <b>{lessons.length}</b> شرح</span>}
